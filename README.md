@@ -1,4 +1,4 @@
-# v11 Structured Planner
+# Structured Planner
 
 Learned driving planner for the RC vehicle (Jetson Orin Nano + RealSense camera).
 
@@ -10,28 +10,28 @@ Learned driving planner for the RC vehicle (Jetson Orin Nano + RealSense camera)
 
 Classic end-to-end driving feeds raw camera pixels directly into a neural network that outputs steering and throttle. That works but requires enormous amounts of data, is sensitive to lighting and visual domain, and is hard to debug.
 
-This project takes a different approach — the same architecture Tesla used before FSD v12:
+This project takes a different approach:
 
 ```
-Camera ──► YOLO           ──► object list (class, distance, position…)  ─┐
-       ──► Lane Seg (LKAS) ──► lane boundaries, centre offset…           ─┤──► PLANNER ──► steering
-                                                                           │               throttle
-                               ego state (prev steering/throttle)        ─┘
+Camera ──► YOLO              ──► object list (class, distance, position…)  ─┐
+       ──► BiSeNet (LaneSeg) ──► 6×12 lane-pixel grid                      ─┤──► PLANNER ──► steering
+                                                                             │               throttle
+                               ego state (prev steering/throttle)          ─┘
 ```
 
 **Your colleague** owns the left side (perception — camera, YOLO, lane segmentation).
 **This module** owns the right side (planner — structured numbers in, actuation out).
 
-The planner never touches pixels. It only ever sees a fixed-size vector of normalised numbers describing the world, and it outputs two numbers: steering and throttle.
+The planner never touches pixels. It sees a fixed-size vector of normalised numbers describing the world and outputs two numbers: steering and throttle.
 
 ### Why this is better for this project
 
 | Property | End-to-end (pixels → control) | This planner (features → control) |
 |---|---|---|
 | Data needed | Thousands of frames | Hundreds of rows |
-| Sensitive to lighting | Yes | No |
-| Augmentation | Hard (image transforms) | Easy (perturb numbers) |
-| Model size | Millions of params | ~10 k params |
+| Sensitive to lighting | Yes | No (lane grid is binary mask) |
+| Augmentation | Hard (image transforms) | Easy (perturb numbers / flip grid) |
+| Model size | Millions of params | ~100 k params |
 | Inference time on Jetson | 10–50 ms | < 1 ms |
 | Debuggable | Hard | Read the CSV |
 
@@ -39,14 +39,14 @@ The planner never touches pixels. It only ever sees a fixed-size vector of norma
 
 ## Input / Output
 
-### Planner Input (per frame, ~50 numbers total)
+### Planner Input (per frame, 114 floats + 1 scenario token)
 
 **Object block** — top 5 closest YOLO detections, padded with zeros if fewer:
 
 | Feature | Description | Range |
 |---|---|---|
 | `valid` | 1 if slot has a real object, 0 if padding | {0, 1} |
-| `class_norm` | YOLO class ID ÷ total classes | [0, 1] |
+| `class_norm` | YOLO class ID ÷ (N_CLASSES − 1) | [0, 1] |
 | `conf` | Detection confidence | [0, 1] |
 | `dist_norm` | Distance ÷ 5 m | [0, 1] |
 | `lat_offset` | Signed lateral offset from lane centre, normalised by lane width | (−∞, ∞) |
@@ -56,17 +56,20 @@ The planner never touches pixels. It only ever sees a fixed-size vector of norma
 
 5 objects × 8 features = **40 values**
 
-**Lane block** — from LKAS lane segmentation:
+**Lane block** — 6×12 spatial grid pooled from the BiSeNet segmentation mask:
 
-| Feature | Description |
-|---|---|
-| `lane_detected` | 1 if LKAS found lanes, 0 if using fallback |
-| `lane_center_offset` | (frame centre − lane centre) ÷ lane width — positive means car is left of centre |
-| `lane_width_norm` | Lane width ÷ frame width |
-| `lane_left_x_norm` | Left lane boundary ÷ frame width |
-| `lane_right_x_norm` | Right lane boundary ÷ frame width |
+The binary lane mask is resized to a coarse 64×112 image, then divided into 6 rows × 12 columns. Each cell stores the mean lane-pixel fraction [0.0–1.0]. Row 0 = far (top of image), Row 5 = near (bottom).
 
-5 values
+```
+Far   [0.0][0.0][0.3][0.8][0.8] … ← road curves right ahead
+      [0.0][0.1][0.5][0.9][0.9] …
+      [0.0][0.2][0.7][1.0][1.0] …
+      [0.0][0.3][0.8][1.0][1.0] …
+      [0.1][0.4][0.9][1.0][1.0] …
+Near  [0.2][0.5][1.0][1.0][1.0] … ← nearly centred now
+```
+
+6 rows × 12 cols = **72 values** (row-major: `lane_r0c0`, `lane_r0c1`, … `lane_r5c11`)
 
 **Ego state** — previous cycle's output:
 
@@ -75,16 +78,18 @@ The planner never touches pixels. It only ever sees a fixed-size vector of norma
 | `ego_steering` | Previous steering command |
 | `ego_throttle` | Previous throttle ÷ MAX_THROTTLE |
 
-2 values
+**2 values**
 
 **Scenario token** — integer that tells the planner what it is supposed to be doing:
 
 | Value | Name | When to use |
 |---|---|---|
 | 0 | LANE_FOLLOW | Normal track driving |
-| 1 | OBSTACLE_AVOID | Obstacles present |
-| 2 | PARKING | Parking manoeuvre |
-| 3 | STOP | Deliberate stop |
+| 1 | LEFT_TURN | Turning left at junction |
+| 2 | RIGHT_TURN | Turning right at junction |
+| 3 | GO_STRAIGHT | Straight through intersection / past stop line |
+| 4 | PULL_OVER | Pulling over to roadside (emergency stop) |
+| 5 | PARKING | Parking manoeuvre |
 
 ### Planner Output
 
@@ -98,25 +103,26 @@ The planner never touches pixels. It only ever sees a fixed-size vector of norma
 ## Model Architecture
 
 ```
-objects  (40) ── Linear(40→64) ── LayerNorm ── ReLU ── Linear(64→64) ── ReLU ──┐
-lane      (5) ── Linear(5→32)  ── ReLU ────────────────────────────────────────┤
-ego       (2) ── Linear(2→16)  ── ReLU ────────────────────────────────────────┤ concat (120)
-scenario  (1) ── Embedding(4,8) ────────────────────────────────────────────────┘
+objects  (40) ── Linear(40→128) ── LayerNorm ── ReLU ── Linear(128→128) ── ReLU ── Linear(128→64) ── ReLU ──┐
+lane     (72) ── Linear(72→128) ── ReLU ────────────────────────────── Linear(128→128) ── ReLU ── Linear(128→64) ── ReLU ──┤
+ego       (2) ── Linear(2→32)   ── ReLU ────────────────────────────────────────────────────────────────────────────────────┤ concat (168)
+scenario  (1) ── Embedding(6,8) ─────────────────────────────────────────────────────────────────────────────────────────────┘
                                         │
-                              Linear(120→64) ── ReLU ── Dropout(0.2)
-                              Linear(64→32)  ── ReLU
-                                    ├── Linear(32→1) ── Tanh()    → steering ∈ [−1, 1]
-                                    └── Linear(32→1) ── Sigmoid() → throttle ∈ [ 0, 1]
+                              Linear(168→256) ── ReLU ── Dropout(0.2)
+                              Linear(256→128) ── ReLU ── Dropout(0.1)
+                              Linear(128→64)  ── ReLU
+                                    ├── Linear(64→1) ── Tanh()    → steering ∈ [−1, 1]
+                                    └── Linear(64→1) ── Sigmoid() → throttle ∈ [ 0, 1]
 ```
 
-Total trainable parameters: ~10,000. Trains in minutes on the Jetson.
+Total trainable parameters: ~100,000. Trains in minutes on the Jetson.
 
 ---
 
 ## File Map
 
 ```
-v11/
+e2e-planner/
 ├── planner_model.py          ← shared definitions — model, feature builders, CSV schema
 │                               import from this in everything else
 │
@@ -126,13 +132,20 @@ v11/
 ├── evaluate.py               ← Step 4: offline error metrics + plots
 ├── planner_inference.py      ← Step 5: run the trained model on the vehicle
 │
-│ ── legacy (camera-based approach, kept for reference) ──────────────────────
-├── collect_data.py           ← old: saves raw .jpg + .npy + labels.csv
-├── train.py                  ← old: MobileNetV3 + DepthCNN on camera input
-├── yolo_depth_avoidance_ml.py← old: camera-based ML inference
-├── yolo_depth_avoidance.py   ← old: rule-based avoidance
-├── obstacle_avoidance.py     ← old: rule-based mode decision logic
-└── yolo_web_viewer.py        ← web viewer (shared, still used)
+├── lane_seg.py               ← BiSeNet wrapper (loads model directly, no LKAS)
+├── camera.py                 ← RealSense camera wrapper
+├── planner_viewer.py         ← Web viewer for collection and inference
+├── yolo_config.py            ← YOLO model path and thresholds
+├── gamepads.py               ← Gamepad / controller input (optional)
+├── dedup.py                  ← CSV deduplication utility
+│
+├── doc/
+│   ├── ARCHITECTURE.md       ← lane feature design history and roadmap
+│   └── WORKFLOW.md           ← end-to-end workflow notes
+│
+├── requirements.txt          ← Jetson dependencies (see install notes below)
+├── requirements_desktop.txt  ← desktop-only deps (training / evaluation)
+└── TROUBLESHOOTING.md
 ```
 
 ---
@@ -141,8 +154,26 @@ v11/
 
 ### Prerequisites
 
+**PyTorch (Jetson — must install from Jetson AI Lab, not PyPI):**
 ```bash
-pip install ultralytics torch torchvision pandas numpy matplotlib
+python3 -m pip install torch torchvision \
+    --index-url=https://pypi.jetson-ai-lab.io/jp6/cu126
+```
+
+After installing torch, install the missing CUDA sparse solver (required on JetPack 6.x):
+```bash
+wget https://developer.download.nvidia.com/compute/cuda/repos/ubuntu2204/sbsa/cuda-keyring_1.1-1_all.deb
+sudo dpkg -i cuda-keyring_1.1-1_all.deb
+sudo apt-get update && sudo apt-get install libcudss0-cuda-12
+echo "/usr/lib/aarch64-linux-gnu/libcudss/12" | sudo tee /etc/ld.so.conf.d/cudss.conf
+sudo ldconfig
+```
+
+Tested: torch==2.10.0, torchvision==0.25.0, JetPack 6.2, CUDA 12.6.
+
+**Other dependencies:**
+```bash
+pip install -r requirements.txt
 # lkas and jetracer already installed as editable packages
 ```
 
@@ -150,27 +181,26 @@ pip install ultralytics torch torchvision pandas numpy matplotlib
 
 ### Step 1 — Collect Data
 
-Run **two terminals**. LKAS must start first — it owns all shared memory.
+The collector runs standalone — no LKAS process required. BiSeNet is loaded directly via `lane_seg.py`.
 
-**Terminal 1** — start LKAS first:
 ```bash
-lkas --broadcast
-```
-
-Wait until you see `image: ● CONNECTED` in the LKAS status bar, then:
-
-**Terminal 2** — start data collection:
-```bash
-cd /home/peter/ads-skynet/planner/realsense_cam/v11
-
 # Normal track driving
 python collect_data_planner.py --scenario 0
 
-# With obstacles on the track
+# Turning left at junction
 python collect_data_planner.py --scenario 1
 
-# Parking manoeuvre
+# Turning right at junction
 python collect_data_planner.py --scenario 2
+
+# Straight through intersection
+python collect_data_planner.py --scenario 3
+
+# Pull-over
+python collect_data_planner.py --scenario 4
+
+# Parking
+python collect_data_planner.py --scenario 5
 ```
 
 Open the web viewer in a browser: `http://<jetson-ip>:8082`
@@ -178,20 +208,22 @@ Open the web viewer in a browser: `http://<jetson-ip>:8082`
 **Controls in the browser:**
 - `←` / `→` — steer left / right (hold the key)
 - `↓` — stop (throttle = 0)
+- `0`–`5` — switch scenario token live
 - `Space` — toggle recording ON/OFF (red badge = recording)
-- `Ctrl+C` in Terminal 1 — quit and save
+- `Ctrl+C` in terminal — quit and save
 
 **Tips:**
 - Collect at least ~300 rows per scenario before augmenting
 - Cover edge cases: sharp corners, obstacle on left side, obstacle on right side, clear straight
 - Check the live counter in the terminal to confirm rows are being saved
-- LKAS not running is OK — `lane_detected=0` rows are still valid training data, the model learns to handle it
+- If BiSeNet is not detecting lanes, a warning is printed after 30 consecutive no-lane saved rows — check camera angle and lighting
 
 **Output:** `data/planner_data.csv` — one row per saved frame, appended across sessions.
 
 **What each row contains:**
 ```
-frame_id | obj0_valid … obj4_lane_overlap | lane_detected … lane_right_x_norm |
+frame_id | obj0_valid … obj4_lane_overlap (40 cols) |
+lane_r0c0 … lane_r5c11 (72 cols) |
 ego_steering | ego_throttle | scenario | target_steering | target_throttle
 ```
 
@@ -212,9 +244,9 @@ python augment.py --input data/planner_data.csv --output data/augmented_data.csv
 | Transform | Physical meaning |
 |---|---|
 | Identity | Keep original |
-| Mirror | Horizontal flip — negate lateral offsets and steering |
+| Mirror | Horizontal flip — negate lateral offsets, steering, and flip lane grid columns |
 | Distance noise | Simulate RealSense depth noise (σ = 3 cm normalised) |
-| Lateral jitter | Simulate YOLO box jitter and LKAS lane wobble |
+| Lateral jitter | Simulate YOLO box jitter |
 | Confidence noise | Simulate varying detection confidence |
 | Object dropout | Simulate a missed detection (one object randomly removed) |
 | Distance scale | Simulate depth calibration drift (±15%) |
@@ -286,8 +318,8 @@ OVERALL RESULTS
 PER-SCENARIO RESULTS
   Scenario               N   Steer MAE   Steer RMSE   Thtl MAE
   LANE_FOLLOW          120      0.0412       0.0634     0.0021
-  OBSTACLE_AVOID       130      0.1204       0.1543     0.0061
-  PARKING               50      0.0934       0.1123     0.0078
+  LEFT_TURN             80      0.1204       0.1543     0.0061
+  PULL_OVER             50      0.0934       0.1123     0.0078
 ```
 
 **Output — plots saved to `data/eval/`:**
@@ -298,20 +330,14 @@ PER-SCENARIO RESULTS
 - `timeseries.png` — prediction tracking over 200 frames
 
 **Reading the results:**
-- Steering MAE < 0.10 is good for discrete {−0.9, 0, +0.9} targets
-- If one scenario has much higher error than others → collect more data for that scenario
+- Steering MAE < 0.10 is good
+- If one scenario has much higher error → collect more data for that scenario
 - A biased error histogram (not centred at 0) → the model is systematically off in one direction
 
 ---
 
 ### Step 5 — Inference on Vehicle
 
-**Terminal 1:**
-```bash
-lkas --broadcast
-```
-
-**Terminal 2:**
 ```bash
 # Simulation first (no motor output):
 python planner_inference.py --scenario 0
@@ -319,7 +345,7 @@ python planner_inference.py --scenario 0
 # Enable motors once you've verified the steering looks correct in the web viewer:
 python planner_inference.py --scenario 0 --motor
 
-# With obstacles on the track:
+# Left turn at junction:
 python planner_inference.py --scenario 1 --motor
 
 # Use a different model file:
@@ -332,7 +358,7 @@ The annotation overlay shows:
 - Scenario name (colour-coded)
 - Current predicted steering and throttle
 - YOLO bounding boxes with distances
-- Lane boundary lines
+- Lane grid overlay (green cells = lane pixels)
 
 **Terminal output (updated every second):**
 ```
@@ -346,17 +372,11 @@ The annotation overlay shows:
 ```
                     DATA COLLECTION
 ┌─────────────────────────────────────────────────────┐
-│  Terminal 1: lkas --broadcast                        │
-│    RealSense ──► image SHM ──► lane segmentation    │
-│                              ──► detection SHM      │
-└─────────────────────────────────────────────────────┘
-                    │ (detection SHM)
-┌─────────────────────────────────────────────────────┐
-│  Terminal 2: collect_data_planner.py                 │
-│    RealSense ──► YOLO ──► object features           │
-│    detection SHM ──────► lane features              │
-│    web viewer  ────────► human steering/throttle    │
-│    all ────────────────► planner_data.csv           │
+│  python collect_data_planner.py --scenario 0         │
+│    RealSense ──► YOLO (CPU) ──► object features     │
+│    RealSense ──► BiSeNet (GPU) ──► lane grid (72)   │
+│    web viewer ────────────► human steering/throttle  │
+│    all ────────────────────► planner_data.csv        │
 └─────────────────────────────────────────────────────┘
 
                     OFFLINE PIPELINE
@@ -369,24 +389,20 @@ The annotation overlay shows:
   train_planner.py ──► planner_model.pth
        │
        ▼
-  evaluate.py ──► data/eval/*.png + summary.txt
+  evaluate.py ──► data/eval/*.png + summary
 
                     INFERENCE
 ┌─────────────────────────────────────────────────────┐
-│  Terminal 1: lkas --broadcast                        │
-└─────────────────────────────────────────────────────┘
-                    │
-┌─────────────────────────────────────────────────────┐
-│  Terminal 2: planner_inference.py                    │
-│    image SHM ──► YOLO ──► object features          │
-│    detection SHM ──────► lane features              │
-│    ego state ──────────► ego features               │
-│    --scenario flag ────► scenario token             │
-│    all ────────────────► PlannerModel               │
-│                              │                      │
-│                    [steering, throttle]              │
-│                         │          │                │
-│                    JetRacer    control SHM          │
+│  python planner_inference.py --scenario 0 --motor    │
+│    RealSense ──► YOLO (CPU) ──► object features     │
+│    RealSense ──► BiSeNet (GPU) ──► lane grid (72)   │
+│    ego state ──────────────► ego features            │
+│    --scenario flag ─────────► scenario token         │
+│    all ─────────────────────► PlannerModel           │
+│                                    │                 │
+│                          [steering, throttle]        │
+│                               │          │           │
+│                          JetRacer    web viewer      │
 └─────────────────────────────────────────────────────┘
 ```
 
@@ -400,20 +416,20 @@ The annotation overlay shows:
 3. Re-run augment + train + evaluate
 
 **Model steers in the wrong direction consistently:**
-- Check the mirror augmentation is working: mirrored rows should have negated steering
+- Check the mirror augmentation is working: mirrored rows should have negated steering and flipped lane grid columns
 - Verify the JetRacer hardware inversion (`car.steering = -final_steering`) is correct for your vehicle
 
 **Throttle always too high or too low:**
-- Check `MAX_THROTTLE` in `planner_model.py` matches the value used during collection
-- Default is `0.30` — if `BASE_THROTTLE` in `collect_data_planner.py` was changed, update `MAX_THROTTLE` to match
+- Check `MAX_THROTTLE` in `planner_model.py` matches the `FULL_THROTTLE` value used in `planner_viewer.py`
+- Default is `0.35`
 
-**No lane detection (lane_detected always 0):**
-- LKAS is not running or not detecting lanes
-- The model still works but uses fallback lane positions — consider collecting dedicated data with LKAS running so the model learns both conditions
+**No lane detection (lane grid all zeros):**
+- BiSeNet is not detecting lanes — check camera angle and lighting
+- The model still operates but without lane information; collect dedicated data with BiSeNet running so the model learns both conditions
 
 **FPS too low during inference:**
-- Reduce `YOLO_SKIP` from 2 to 3 or 4 in `planner_inference.py`
-- The planner forward pass itself is < 1 ms — YOLO is the bottleneck
+- YOLO runs on CPU (GPU is reserved for BiSeNet); reduce `YOLO_SKIP` to run YOLO less frequently
+- The planner forward pass itself is < 1 ms — YOLO and BiSeNet are the bottlenecks
 
 ---
 
@@ -430,9 +446,13 @@ All shared constants live in `planner_model.py`. Change them there and they prop
 | Constant | Default | Meaning |
 |---|---|---|
 | `N_MAX_OBJECTS` | 5 | Max YOLO detections tracked per frame |
+| `OBJ_FEATURES` | 8 | Features per object slot |
+| `GRID_ROWS` | 6 | Lane grid rows (far → near) |
+| `GRID_COLS` | 12 | Lane grid columns (left → right) |
+| `LANE_FEATURES` | 72 | Total lane grid cells (GRID_ROWS × GRID_COLS) |
 | `MAX_DIST_M` | 5.0 | Distance normalisation ceiling (metres) |
-| `MAX_THROTTLE` | 0.30 | Physical throttle ceiling for JetRacer |
-| `FRAME_W` | 768 | Camera resolution width |
-| `FRAME_H` | 384 | Camera resolution height |
+| `MAX_THROTTLE` | 0.35 | Physical throttle ceiling for JetRacer |
+| `FRAME_W` | 848 | Camera resolution width |
+| `FRAME_H` | 480 | Camera resolution height |
 | `N_YOLO_CLASSES` | 80 | YOLO class count (COCO default) |
-| `N_SCENARIOS` | 4 | Scenario token vocabulary size |
+| `N_SCENARIOS` | 6 | Scenario token vocabulary size |
