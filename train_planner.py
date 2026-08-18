@@ -81,14 +81,22 @@ class PlannerDataset(Dataset):
         if len(df) < before:
             print(f"[data] Dropped {before - len(df)} rows with NaN values")
 
-        # Drop startup frames where ego_throttle≈0 but target_throttle is also low.
-        # These occur at the beginning of each collection session before the vehicle
-        # gets up to speed. Training on them teaches the model ego=0 → output low
-        # throttle, which creates a stuck feedback loop at inference startup.
+        # Drop rows where both ego and target throttle are ~0 (startup frames before motion)
         before = len(df)
-        df = df[~((df["ego_throttle"] < 0.1) & (df["target_throttle"] < 0.1))].reset_index(drop=True)
+        df = df[~((df["ego_throttle"].abs() < 0.05) & (df["target_throttle"].abs() < 0.05))].reset_index(drop=True)
         if len(df) < before:
             print(f"[data] Dropped {before - len(df)} startup rows (ego_thr<0.1 & target_thr<0.1)")
+
+        # ── Zero-Cost Hard Negative Injection ──────────────────────────────
+        hard_mask = (df["target_steering"].abs() > 0.3) | (df["target_throttle"] < 0.1)
+        df_hard = df[hard_mask]
+        if len(df_hard) > 0:
+            df = pd.concat([df, df_hard, df_hard], axis=0) \
+                   .sample(frac=1.0, random_state=42) \
+                   .reset_index(drop=True)
+            print(f"[data] Hard-negative injection: amplified {len(df_hard)} corner/brake "
+                  f"rows (x3) -> {len(df)} total rows")
+        # ─────────────────────────────────────────────────────────────────
 
         self.df = df
         print(f"[data] Loaded {len(df)} rows from {csv_path.name}")
@@ -127,6 +135,11 @@ class PlannerDataset(Dataset):
         # Ego features: (EGO_FEATURES,)
         ego = torch.tensor([float(row["ego_steering"]),
                             float(row["ego_throttle"])], dtype=torch.float32)
+                            
+        # 💡 [추가된 부분: 라이다 센서 데이터 추출 및 텐서화]
+        # CSV 파일의 각 행에서 lidar_s0 ~ lidar_s4 컬럼 값을 읽어와 5차원 PyTorch 텐서로 변환합니다.
+        lidar_vals = [float(row[f"lidar_s{i}"]) for i in range(5)]
+        lidar = torch.tensor(lidar_vals, dtype=torch.float32)
 
         # Scenario token
         scenario = torch.tensor(int(row["scenario"]), dtype=torch.long)
@@ -135,7 +148,8 @@ class PlannerDataset(Dataset):
         target = torch.tensor([float(row["target_steering"]),
                                 float(row["target_throttle"])], dtype=torch.float32)
 
-        return objects, lane, ego, scenario, target
+        # 💡 [변경된 부분: 라이다 데이터를 포함하여 총 6개의 반환값(Tuple) 제공]
+        return objects, lane, lidar, ego, scenario, target
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -250,9 +264,14 @@ def train(
         sample = dataset[0]
         o_t = sample[0].unsqueeze(0).to(device)
         l_t = sample[1].unsqueeze(0).to(device)
-        e_t = sample[2].unsqueeze(0).to(device)
-        s_t = sample[3].unsqueeze(0).to(device)
-        out = model(o_t, l_t, e_t, s_t)
+        
+        # 💡 [추가 및 변경된 부분: 모델 초기화 점검용 더미 테스트에 라이다 텐서 추가]
+        # 데이터셋 반환값이 6개로 늘어남에 따라 인덱스를 순서대로 밀어주고, 라이다(ld_t)를 세 번째 입력으로 전달합니다.
+        ld_t = sample[2].unsqueeze(0).to(device) 
+        e_t = sample[3].unsqueeze(0).to(device)
+        s_t = sample[4].unsqueeze(0).to(device)
+        out = model(o_t, l_t, ld_t, e_t, s_t)
+        
     print(f"  Forward check   : input shapes obj={tuple(o_t.shape)} "
           f"lane={tuple(l_t.shape)} ego={tuple(e_t.shape)} sc={tuple(s_t.shape)}")
     print(f"  Output sample   : steer={out[0,0].item():+.4f}  "
@@ -280,18 +299,26 @@ def train(
         # ── Train ─────────────────────────────────────────────────────────────
         model.train()
         running_loss = 0.0
-        for objects, lane, ego, scenario, target in train_loader:
+        
+        # 💡 [추가 및 변경된 부분: 학습 데이터 로더 언패킹 시 라이다 포함]
+        for objects, lane, lidar, ego, scenario, target in train_loader:
             objects  = objects.to(device)
             lane     = lane.to(device)
-            ego      = ego.to(device)
+            
+            # 💡 [추가된 부분: 라이다 데이터를 GPU/CPU 메모리로 이동]
+            lidar    = lidar.to(device)    
+            ego      = ego.to(device)      
             scenario = scenario.to(device)
             target   = target.to(device)
 
             optimizer.zero_grad()
-            pred = model(objects, lane, ego, scenario)   # (B, 2)
+            
+            # 💡 [변경된 부분: 모델 추론에 라이다(lidar) 인자 추가]
+            # 새롭게 변경된 PlannerModel의 forward 시그니처에 맞추어 정확한 순서로 5개의 인자를 넘겨줍니다.
+            pred = model(objects, lane, lidar, ego, scenario)   
             loss = criterion(pred, target)
             loss.backward()
-            # Gradient clipping — keeps training stable for tiny datasets
+            
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             running_loss += loss.item() * len(target)
@@ -305,13 +332,18 @@ def train(
         steer_abs    = 0.0
         thtl_abs     = 0.0
         with torch.no_grad():
-            for objects, lane, ego, scenario, target in val_loader:
+            
+            # 💡 [추가 및 변경된 부분: 검증 데이터 로더 언패킹 시 라이다 포함 및 모델 추론 반영]
+            # 훈련 루프와 완벽히 동일한 방식으로 라이다 데이터를 텐서화하고 검증 추론에 활용합니다.
+            for objects, lane, lidar, ego, scenario, target in val_loader:
                 objects  = objects.to(device)
                 lane     = lane.to(device)
                 ego      = ego.to(device)
+                lidar    = lidar.to(device) 
                 scenario = scenario.to(device)
                 target   = target.to(device)
-                pred     = model(objects, lane, ego, scenario)
+                pred     = model(objects, lane, lidar, ego, scenario)
+                
                 loss     = criterion(pred, target)
                 running_loss += loss.item() * len(target)
                 steer_abs    += (pred[:, 0] - target[:, 0]).abs().sum().item()

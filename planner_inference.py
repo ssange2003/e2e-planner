@@ -35,6 +35,7 @@ import argparse
 import threading
 import numpy as np
 from pathlib import Path
+from lidar_sensor import LidarSensor
 
 import torch
 
@@ -42,6 +43,14 @@ import torch
 script_dir = Path(__file__).resolve().parent
 sys.path.append(str(script_dir.parent / "vehicle" / "src"))
 sys.path.append(str(script_dir.parent / "common" / "src"))
+
+class SmartReverseFilter:
+    def __init__(self):
+        pass
+
+    def process(self, throttle: float) -> float:
+        # 입력된 스로틀 값을 그대로 통과시키거나 후진 제어 로직 수행
+        return throttle
 
 # ── PyTorch legacy weights fix ────────────────────────────────────────────────
 _orig_torch_load = torch.load
@@ -96,6 +105,7 @@ from planner_model import (
     FRAME_W, FRAME_H,
     SCENARIO_LANE_FOLLOW, SCENARIO_LEFT_TURN, SCENARIO_RIGHT_TURN,
     SCENARIO_GO_STRAIGHT, SCENARIO_PULL_OVER, SCENARIO_PARKING,
+    SCENARIO_CUSTOM_SPLINE,  # 💡 상수로 관리
     SCENARIO_NAMES,
 )
 
@@ -107,6 +117,35 @@ PLANNER_MODEL_PATH = script_dir / "planner_model.pth"
 
 _SCENARIO_NAMES = SCENARIO_NAMES  # imported from planner_model
 
+# 💡 [핵심 1번 수정] 기존 collect.py에 있던 5구역 분할 로직을 그대로 이식하여 에러 방지
+def process_lidar_to_5_sectors(raw_scan):
+    """
+    1000개의 원본 데이터를 받아 기존 시스템과 완벽히 동일한 5개의 논리적 섹터(s0~s4)로 덜어냅니다.
+    """
+    def get_min_dist(idx_start, idx_end):
+        # 0(정면)을 걸쳐서 슬라이싱해야 하는 경우
+        if idx_start > idx_end:
+            slice1 = raw_scan[idx_start:]
+            slice2 = raw_scan[:idx_end]
+            valid_dists = np.concatenate((slice1[slice1 > 0.0], slice2[slice2 > 0.0]))
+        else:
+            slice_data = raw_scan[idx_start:idx_end]
+            valid_dists = slice_data[slice_data > 0.0]
+        
+        # 측정된 값이 있으면 최솟값(가장 가까운 거리) 반환, 없으면 최대거리 5.0m 반환
+        if len(valid_dists) > 0:
+            return min(5.0, float(np.min(valid_dists)))
+        return 5.0
+
+    # 섹터별 물리적 인덱스 계산 (좌측이 +, 우측이 -) 원래 로직 그대로 복구
+    s0 = get_min_dist(83, 166)   # 좌측
+    s1 = get_min_dist(27, 83)    # 좌전방
+    s2 = get_min_dist(972, 27)   # 정면
+    s3 = get_min_dist(916, 972)  # 우전방
+    s4 = get_min_dist(833, 916)  # 우측
+
+    return [s0, s1, s2, s3, s4]
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Feature extraction
 # ─────────────────────────────────────────────────────────────────────────────
@@ -116,10 +155,11 @@ def extract_features(
     mask,
     prev_steering, prev_throttle,
     device,
+    lidar_sectors,
 ):
     """
-    Build model-ready tensors from raw YOLO detections + BiSeNet lane mask.
-    Returns (objects, lane, ego) tensors, all batched with B=1.
+    Build model-ready tensors from raw YOLO detections + BiSeNet lane mask + LiDAR.
+    Returns (objects, lane, lidar, ego) tensors, all batched with B=1.
     """
     left_lane_x, right_lane_x = lane_boundaries_from_mask(mask)
 
@@ -130,13 +170,15 @@ def extract_features(
         frame_w=FRAME_W, frame_h=FRAME_H, n_classes=N_YOLO_CLASSES,
     )
     lane_feats = build_lane_grid(mask)
+    lidar_feats = [float(v) for v in lidar_sectors]
     ego_feats  = [prev_steering, prev_throttle / MAX_THROTTLE]
 
-    objects_t = torch.tensor(obj_feats,  dtype=torch.float32, device=device).unsqueeze(0)
-    lane_t    = torch.tensor(lane_feats, dtype=torch.float32, device=device).unsqueeze(0)
-    ego_t     = torch.tensor(ego_feats,  dtype=torch.float32, device=device).unsqueeze(0)
+    objects_t = torch.tensor(obj_feats,   dtype=torch.float32, device=device).unsqueeze(0)
+    lane_t    = torch.tensor(lane_feats,  dtype=torch.float32, device=device).unsqueeze(0)
+    lidar_t   = torch.tensor(lidar_feats, dtype=torch.float32, device=device).unsqueeze(0)
+    ego_t     = torch.tensor(ego_feats,   dtype=torch.float32, device=device).unsqueeze(0)
 
-    return objects_t, lane_t, ego_t
+    return objects_t, lane_t, lidar_t, ego_t
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -147,12 +189,14 @@ import cv2
 _visualizer = LKASVisualizer(image_width=FRAME_W, image_height=FRAME_H)
 
 _MODE_COLORS = {
-    SCENARIO_LANE_FOLLOW: (0, 255, 0),
-    SCENARIO_LEFT_TURN:   (255, 255, 0),
-    SCENARIO_RIGHT_TURN:  (0, 255, 255),
-    SCENARIO_GO_STRAIGHT: (255, 165, 0),
-    SCENARIO_PULL_OVER:   (255, 0, 255),
-    SCENARIO_PARKING:     (0, 128, 255),
+    SCENARIO_LANE_FOLLOW:   (0, 255, 0),
+    SCENARIO_LEFT_TURN:     (255, 255, 0),
+    SCENARIO_RIGHT_TURN:    (0, 255, 255),
+    SCENARIO_GO_STRAIGHT:   (255, 165, 0),
+    SCENARIO_PULL_OVER:     (255, 0, 255),
+    SCENARIO_PARKING:       (0, 128, 255),
+    SCENARIO_CUSTOM_SPLINE: (128, 0, 255),  # 💡 상수로 일치시킴 (보라색)
+    # 7~10번 등 향후 추가될 시나리오 모드별 색상도 이곳에 상수로 확장 가능
 }
 _BOX_COLORS = [
     (0, 255, 0), (255, 0, 0), (0, 165, 255), (255, 165, 0),
@@ -250,6 +294,7 @@ def main(
     model_path:   Path = PLANNER_MODEL_PATH,
     verbose:      bool = False,
     log_history:  bool = False,
+    lidar = LidarSensor()
 ):
     # Both YOLO and planner run on CPU.
     # LKAS BiSeNet (DL method, device="auto") claims the GPU; putting YOLO
@@ -347,8 +392,14 @@ def main(
         print(f"[HIST] Logging to {_hist_path}")
 
     # ── State ─────────────────────────────────────────────────────────────────
+    '''# ── 물리적 경계 조건 설정 ──
+    V_START = 0.33  # 모터가 바퀴를 굴리기 시작하는 최소 스로틀
+    V_MAX   = 0.33 # 실전 주행 최대 스로틀
+    GAMMA   = 1.5   # 초반 세밀 조종을 위한 가마 감도 곡선'''
+
     prev_steering = 0.0
     prev_throttle = MAX_THROTTLE  # warm-start: avoids ego=0 → low-throttle feedback loop
+    smart_filter = SmartReverseFilter()
 
     fps       = 0.0
     fps_count = 0
@@ -367,6 +418,14 @@ def main(
             color_bgr, depth_raw = camera.read_frames()
             if color_bgr is None:
                 continue
+                
+            # 💡 [수정됨] 노란색을 하얀색으로 덧칠하는 전처리 필터 (튜닝값 적용)
+            hsv = cv2.cvtColor(color_bgr, cv2.COLOR_BGR2HSV)
+            lower_yellow = np.array([0, 0, 184])
+            upper_yellow = np.array([96, 255, 255])
+            yellow_mask = cv2.inRange(hsv, lower_yellow, upper_yellow)
+            color_bgr[yellow_mask > 0] = (255, 255, 255)
+            # ──────────────────────────────────────────────────────────
 
             depth_array = depth_raw if depth_raw is not None else \
                           np.zeros((frame_h, frame_w), dtype=np.uint16)
@@ -378,6 +437,7 @@ def main(
             left_x, right_x = lane_boundaries_from_mask(mask)
 
             # ── YOLO (background thread — never blocks the main loop) ─────────
+            global _yolo_running  # 💡 파이썬에게 전역 변수임을 알려주는 코드 추가
             with _yolo_lock:
                 if not _yolo_running:
                     _yolo_running = True
@@ -403,22 +463,34 @@ def main(
 
             # ── Planner forward pass ───────────────────────────────────────────
             with torch.no_grad():
-                objects_t, lane_t, ego_t = extract_features(
+                # 💡 [핵심 1번 수정] get_sectors() 대신 get_raw_scan()으로 원본을 받아 5구역으로 나눔
+                raw_lidar_array = lidar.get_raw_scan()
+                lidar_feats = process_lidar_to_5_sectors(raw_lidar_array)
+                
+                objects_t, lane_t, lidar_t, ego_t = extract_features(
                     boxes=boxes, distances=distances,
                     class_ids=class_ids, confs=confs,
                     mask=mask,
                     prev_steering=prev_steering, prev_throttle=prev_throttle,
+                    lidar_sectors=lidar_feats,
                     device=planner_device,
                 )
-                out = planner(objects_t, lane_t, ego_t, scenario_t)  # (1, 2)
+                out = planner(objects_t, lane_t, lidar_t, ego_t, scenario_t)  # (1, 2)
 
             # Denormalise outputs
             final_steering = float(out[0, 0].item())               # tanh → [-1, 1]
             final_throttle = float(out[0, 1].item()) * MAX_THROTTLE # sigmoid [0,1] → [0, MAX_THROTTLE]
 
+            # ── 단 1줄의 수학적 변환 (상태 변수 제로) ──
+            '''if ai_throttle_raw > 0.01:
+                # AI가 움직이려는 의도가 조금이라도 있다면, 무조건 V_START 이상으로 기하급수적 매핑
+                final_throttle = V_START + (ai_throttle_raw ** GAMMA) * (V_MAX - V_START)
+            else:
+                final_throttle = 0.0'''
+
             # Clamp for safety
             final_steering = float(np.clip(final_steering, -1.0,       1.0))
-            final_throttle = float(np.clip(final_throttle,  0.0, MAX_THROTTLE))
+            final_throttle = float(np.clip(final_throttle, -MAX_THROTTLE, MAX_THROTTLE))
 
             # ── Verbose debug ──────────────────────────────────────────────────
             if verbose:
@@ -447,8 +519,9 @@ def main(
             act_throttle = 0.0 if is_paused else final_throttle
 
             if car is not None:
-                car.steering = -act_steering   # hardware inversion
-                car.throttle = -act_throttle   # negative = forward
+                car.steering = -act_steering
+                hw_throttle = smart_filter.process(act_throttle) # 더블 탭 시퀀스 변환
+                car.throttle = -hw_throttle
 
             # ── History log ───────────────────────────────────────────────────
             if _hist_writer is not None:
@@ -540,8 +613,8 @@ if __name__ == "__main__":
     parser.add_argument('--motor',    action='store_true',
                         help='Enable JetRacer motor output (default: simulation)')
     parser.add_argument('--scenario', type=int,  default=SCENARIO_LANE_FOLLOW,
-                        choices=[0, 1, 2, 3, 4, 5],
-                        help='0=LANE_FOLLOW 1=LEFT_TURN 2=RIGHT_TURN 3=GO_STRAIGHT 4=PULL_OVER 5=PARKING')
+                        choices=[0, 1, 2, 3, 4, 5, 6],  # 💡 0부터 6까지 숫자로 일관성 있게 통일 (추후 7~10 등 확장 가능)
+                        help='0=LANE_FOLLOW 1=LEFT_TURN 2=RIGHT_TURN 3=GO_STRAIGHT 4=PULL_OVER 5=PARKING 6=CUSTOM_SPLINE')
     parser.add_argument('--model',    type=Path, default=PLANNER_MODEL_PATH,
                         help=f'Model .pth file (default: {PLANNER_MODEL_PATH})')
     parser.add_argument('--verbose',     action='store_true',

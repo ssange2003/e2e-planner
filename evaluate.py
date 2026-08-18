@@ -32,6 +32,10 @@ from pathlib import Path
 
 import torch
 
+# 💡 [추가 및 변경된 부분: SCENARIO_NAMES 임포트]
+# 하드코딩된 시나리오 목록을 지우고, planner_model.py에서 최신 시나리오 
+# 이름 매핑 사전(SCENARIO_NAMES)을 직접 가져오도록 추가되었습니다. 
+# 이제 6번(CUSTOM_SPLINE) 시나리오도 완벽하게 평가 지표에 이름이 찍혀 나옵니다.
 from planner_model import (
     PlannerModel,
     csv_columns,
@@ -39,6 +43,7 @@ from planner_model import (
     MAX_THROTTLE,
     N_SCENARIOS,
     GRID_ROWS, GRID_COLS,
+    SCENARIO_NAMES, 
 )
 
 SCRIPT_DIR  = Path(__file__).resolve().parent
@@ -47,12 +52,9 @@ DEFAULT_CSV = DATA_DIR / "planner_data.csv"
 MODEL_PATH  = SCRIPT_DIR / "planner_model.pth"
 OUT_DIR     = DATA_DIR / "eval"
 
-_SCENARIO_NAMES = {
-    0: "LANE_FOLLOW",
-    1: "OBSTACLE_AVOID",
-    2: "PARKING",
-    3: "STOP",
-}
+# 💡 [삭제된 부분: 과거의 하드코딩된 _SCENARIO_NAMES 딕셔너리 삭제]
+# 예전에 쓰던 0~3번만 들어있던 딕셔너리를 삭제했습니다.
+# 이제는 planner_model.py의 SCENARIO_NAMES를 전역적으로 공유해서 사용합니다.
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -76,17 +78,32 @@ def _load_tensors(csv_path: Path, device):
                            "lat_offset", "width_norm", "height_norm", "lane_overlap")]
     lane_cols = [f"lane_r{r}c{c}"
                  for r in range(GRID_ROWS) for c in range(GRID_COLS)]
+    
+    # 💡 [추가 및 변경된 부분: 라이다 데이터 컬럼 정의]
+    # 원본 코드에서는 카메라 기반 피처(objects, lane)와 차량 상태(ego)만 불러왔습니다.
+    # 하지만 라이다 센서 연동이 추가되면서, CSV 파일에 저장된 5개 구역의 
+    # 라이다 거리 데이터(lidar_s0 ~ lidar_s4)를 읽어오기 위한 컬럼 리스트가 신규로 추가되었습니다.
+    lidar_cols = ["lidar_s0", "lidar_s1", "lidar_s2", "lidar_s3", "lidar_s4"]
     ego_cols  = ["ego_steering", "ego_throttle"]
 
     objects  = torch.tensor(df[obj_cols].values,  dtype=torch.float32, device=device)
     lane     = torch.tensor(df[lane_cols].values, dtype=torch.float32, device=device)
+    
+    # 💡 [추가 및 변경된 부분: 라이다 데이터를 파이토치 텐서로 변환]
+    # 위에서 정의한 lidar_cols를 바탕으로 Pandas DataFrame에서 라이다 값을 추출한 뒤,
+    # AI 모델 연산이 가능하도록 GPU/CPU 메모리에 올라가는 PyTorch 텐서(Tensor) 형태로 변환하는 로직이 추가되었습니다.
+    lidar    = torch.tensor(df[lidar_cols].values, dtype=torch.float32, device=device)  
+    
     ego      = torch.tensor(df[ego_cols].values,  dtype=torch.float32, device=device)
     scenario = torch.tensor(df["scenario"].values, dtype=torch.long,   device=device)
     target   = torch.tensor(
         df[["target_steering", "target_throttle"]].values,
         dtype=torch.float32, device=device)
 
-    return objects, lane, ego, scenario, target, df["scenario"].values
+    # 💡 [추가 및 변경된 부분: 반환(Return) 데이터 개수 증가]
+    # 원본 코드는 총 6개의 값(objects, lane, ego, scenario, target, df["scenario"])만 반환했지만,
+    # 평가 과정에서 라이다 입력값이 필요해지면서 'lidar' 텐서가 중간에 끼어들어가 총 7개의 값을 반환하도록 구조가 수정되었습니다.
+    return objects, lane, lidar, ego, scenario, target, df["scenario"].values
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -128,7 +145,10 @@ def evaluate(
         print(f"[ERROR] Dataset not found: {csv_path}")
         sys.exit(1)
 
-    objects, lane, ego, scenario_t, target, scenario_np = _load_tensors(csv_path, device)
+    # 💡 [추가 및 변경된 부분: 7개의 반환값 언패킹(Unpacking)]
+    # 위에서 수정한 _load_tensors 함수가 이제 라이다(lidar)를 포함해 총 7개의 값을 뱉어내므로,
+    # 데이터를 넘겨받는 이 부분에서도 원본과 달리 'lidar' 변수를 추가하여 7개를 빠짐없이 받아내도록 수정되었습니다.
+    objects, lane, lidar, ego, scenario_t, target, scenario_np = _load_tensors(csv_path, device)
     n = len(target)
     print(f"  Samples : {n}")
     print()
@@ -139,8 +159,13 @@ def evaluate(
     with torch.no_grad():
         for start in range(0, n, batch_size):
             end = min(start + batch_size, n)
-            out = model(objects[start:end], lane[start:end],
-                        ego[start:end], scenario_t[start:end])
+            
+            # 💡 [추가 및 변경된 부분: AI 모델 추론 시 라이다 입력 추가]
+            # 원본 코드에서는 model(objects, lane, ego, scenario_t) 이렇게 4개의 피처만 넘겨주었습니다.
+            # 하지만 라이다 데이터를 함께 학습하도록 구조가 확장된 새로운 PlannerModel을 평가하기 위해,
+            # 세 번째 입력값으로 라이다 텐서(lidar[start:end])를 추가로 밀어넣어 총 5개의 인자를 전달하도록 변경되었습니다.
+            out = model(objects[start:end], lane[start:end], 
+                        lidar[start:end], ego[start:end], scenario_t[start:end])
             preds_list.append(out.cpu())
     preds = torch.cat(preds_list, dim=0)   # (N, 2)
 
@@ -186,7 +211,11 @@ def evaluate(
         sm     = _mae(pred_steer[mask],  true_steer[mask])
         sr     = _rmse(pred_steer[mask], true_steer[mask])
         tm     = _mae(pred_thtl[mask],   true_thtl[mask])
-        name   = _SCENARIO_NAMES.get(int(sc), str(sc))
+        
+        # 💡 [변경된 부분: 임포트된 SCENARIO_NAMES 동적 매핑]
+        # 이제 하드코딩된 _SCENARIO_NAMES가 아니라 planner_model.py에서 가져온 SCENARIO_NAMES를 사용합니다.
+        name   = SCENARIO_NAMES.get(int(sc), str(sc))
+        
         scenario_metrics[name] = {'n': n_sc, 'steer_mae': sm, 'steer_rmse': sr, 'thtl_mae': tm}
         lines.append(f"  {name:<20} {n_sc:>6}  {sm:>10.4f}  {sr:>11.4f}  {tm:>9.4f}")
 

@@ -34,16 +34,27 @@ import torch.nn as nn
 # Feature dimensions  (must stay in sync across collect / augment / train / infer)
 # ─────────────────────────────────────────────────────────────────────────────
 N_MAX_OBJECTS = 5      # objects tracked per frame (padded to this length)
+
+# 💡 [추가된 부분: 라이다 특징 차원 정의]
+# 원본 코드에는 없던 라이다 5구역(s0~s4) 데이터를 입력받기 위해 특징 차원(5)이 신설되었습니다.
+LIDAR_FEATURES = 5  
+
 OBJ_FEATURES  = 8     # features per object slot
 GRID_ROWS     = 6     # spatial grid rows (far → near)
 GRID_COLS     = 12    # spatial grid columns (left → right)
 LANE_FEATURES = GRID_ROWS * GRID_COLS   # 72 — spatial grid of lane fractions
 EGO_FEATURES  = 2     # ego state features (prev_steering, prev_throttle)
-N_SCENARIOS   = 6     # scenario vocabulary size
+
+# 💡 [변경된 부분: 시나리오 어휘 사전 크기 확장]
+# 원본은 6개였으나, 6번(스플라인) 및 미래 확장 시나리오(최대 10개)까지 넉넉히 수용하도록 N_SCENARIOS가 10으로 늘어났습니다.
+N_SCENARIOS   = 10    
 SCENARIO_DIM  = 8     # embedding dimension for scenario token
 
 OBJECT_BLOCK_DIM = N_MAX_OBJECTS * OBJ_FEATURES   # 40
-TOTAL_FLAT_DIM   = OBJECT_BLOCK_DIM + LANE_FEATURES + EGO_FEATURES  # 114
+
+# 💡 [변경된 부분: 전체 평탄화 차원(Total Flat Dim) 계산 수정]
+# 라이다 5차원이 추가됨에 따라 전체 데이터 크기가 기존보다 5만큼 늘어나도록 수식이 보완되었습니다.
+TOTAL_FLAT_DIM   = OBJECT_BLOCK_DIM + LANE_FEATURES + EGO_FEATURES + LIDAR_FEATURES # 114
 
 # Fallback lane boundary x-coordinates when the mask contains no lane pixels
 FIXED_LEFT_LANE_X  = 255
@@ -57,18 +68,29 @@ SCENARIO_GO_STRAIGHT = 3   # straight through intersection / past stop line
 SCENARIO_PULL_OVER   = 4   # pulling over to roadside (emergency stop)
 SCENARIO_PARKING     = 5   # parking manoeuvre
 
+# 💡 [추가된 부분: 커스텀 스플라인 시나리오 토큰]
+# 사용자가 추가한 알고리즘 자율주행 모드(시나리오 6번)에 대한 상수가 새롭게 선언되었습니다.
+SCENARIO_CUSTOM_SPLINE = 6 
+
 SCENARIO_NAMES = {
-    SCENARIO_LANE_FOLLOW: "LANE_FOLLOW",
-    SCENARIO_LEFT_TURN:   "LEFT_TURN",
-    SCENARIO_RIGHT_TURN:  "RIGHT_TURN",
-    SCENARIO_GO_STRAIGHT: "GO_STRAIGHT",
-    SCENARIO_PULL_OVER:   "PULL_OVER",
-    SCENARIO_PARKING:     "PARKING",
+    SCENARIO_LANE_FOLLOW:   "LANE_FOLLOW",
+    SCENARIO_LEFT_TURN:     "LEFT_TURN",
+    SCENARIO_RIGHT_TURN:    "RIGHT_TURN",
+    SCENARIO_GO_STRAIGHT:   "GO_STRAIGHT",
+    SCENARIO_PULL_OVER:     "PULL_OVER",
+    SCENARIO_PARKING:       "PARKING",
+    # 💡 [추가된 부분: 시나리오 이름 맵핑]
+    # 웹 뷰어 및 로그 터미널에 "CUSTOM_SPLINE"이라는 이름이 정상 출력되도록 딕셔너리에 추가되었습니다.
+    SCENARIO_CUSTOM_SPLINE: "CUSTOM_SPLINE", 
 }
 
 # Normalisation constants  (shared between collection and inference)
 MAX_DIST_M     = 5.0    # clip distances beyond this to 1.0
-MAX_THROTTLE   = 0.35   # physical max throttle used during collection (matches FULL_THROTTLE in planner_viewer.py)
+
+# 💡 [수정된 부분: 최대 스로틀 상숫값 조정]
+# 원본 코드의 0.35에서 실제 수집 및 주행 캘리브레이션에 맞춘 0.383으로 미세 조정되었습니다.(add modify 0.36)
+MAX_THROTTLE   = 0.41 
+
 FRAME_W        = 848    # must match camera config — RealSense supported: 848x480, 640x480, 640x360
 FRAME_H        = 480
 N_YOLO_CLASSES = 80     # COCO classes; override if using custom model
@@ -281,12 +303,13 @@ class PlannerModel(nn.Module):
     """
     Structured-input planner.
 
-    forward(objects, lane, ego, scenario) → (B, 2)  [steering, throttle]
+    forward(objects, lane, ego, lidar, scenario) → (B, 2)  [steering, throttle]
 
     Inputs (all float32 except scenario which is long):
       objects  : (B, N_MAX_OBJECTS * OBJ_FEATURES)   40-dim
-      lane     : (B, LANE_FEATURES)                   72-dim  (6×12 spatial grid)
+      lane     : (B, LANE_FEATURES)                  72-dim  (6×12 spatial grid)
       ego      : (B, EGO_FEATURES)                    2-dim
+      lidar    : (B, LIDAR_FEATURES)                  5-dim
       scenario : (B,)                                 long
     """
 
@@ -320,11 +343,21 @@ class PlannerModel(nn.Module):
             nn.ReLU(inplace=True),
         )
 
+        # 💡 [추가된 부분: 라이다 인코더 신경망 레이어]
+        # 원본에는 없던 5차원 라이다 특징을 입력받아 16차원으로 고차원 임베딩하는 선형 레이어가 추가되었습니다.
+        self.lidar_enc = nn.Sequential(
+            nn.Linear(LIDAR_FEATURES, 16),
+            nn.ReLU(inplace=True),
+        )
+
         # Scenario embedding
         self.scenario_embed = nn.Embedding(N_SCENARIOS, SCENARIO_DIM)
 
-        # Fusion + output
-        fused_dim = 64 + 64 + 32 + SCENARIO_DIM  # 168
+        # 💡 [수정된 부분: 특징 융합(Fusion) 차원 확장]
+        # 기존에는 (객체 64 + 차선 64 + 자차 32 + 시나리오 8 = 168) 이었으나,
+        # 라이다 인코딩 결과물(16)이 가세하여 fused_dim이 총 184차원으로 확장되었습니다.
+        fused_dim = 64 + 64 + 32 + 16 + SCENARIO_DIM
+        
         self.shared_trunk = nn.Sequential(
             nn.Linear(fused_dim, 256),
             nn.ReLU(inplace=True),
@@ -341,31 +374,40 @@ class PlannerModel(nn.Module):
             nn.Linear(64, 1),
             nn.Tanh(),                # steering  ∈ [-1, 1]
         )
+        
+        # 💡 [수정된 부분: 스로틀 출력 활성화 함수 변경 (Sigmoid → Tanh)]
+        # 원본 코드는 [0, 1] 범위를 내뱉는 Sigmoid였으나, RC카 후진 제어(-1 ~ 1 또는 음수 전송)를 위해 Tanh로 변경되었습니다.
         self.throttle_head = nn.Sequential(
             nn.Linear(64, 1),
-            nn.Sigmoid(),             # throttle  ∈ [0, 1]  (scale × MAX_THROTTLE for actuation)
+            nn.Tanh(),                
         )
 
+    # 💡 [수정된 부분: forward 메서드 입력 인자 및 연산 순서 변경]
+    # 기존 (objects, lane, ego, scenario) 순서에서 세 번째 자리에 lidar 텐서가 새롭게 끼어들었습니다.
     def forward(
         self,
         objects:  torch.Tensor,   # (B, 40)
-        lane:     torch.Tensor,   # (B, LANE_FEATURES) = (B, 32)
-        ego:      torch.Tensor,   # (B, 2)
+        lane:     torch.Tensor,   # (B, 72)
+        lidar:    torch.Tensor,   # (B, 5)   💡 [추가] 3번째 인자로 라이다 배치 텐서 수신
+        ego:      torch.Tensor,   # (B, 2)   💡 [이동] 4번째 인자로 순서 변경
         scenario: torch.Tensor,   # (B,) long
-    ) -> torch.Tensor:            # (B, 2)  [steering, throttle_norm]
+    ) -> torch.Tensor:            # (B, 2)  [steering, throttle]
 
         o = self.obj_enc(objects)
         l = self.lane_enc(lane)
+        ld = self.lidar_enc(lidar) # 💡 [추가] 라이다 데이터 순방향 연산 실행
         e = self.ego_enc(ego)
         s = self.scenario_embed(scenario)
 
-        fused  = torch.cat([o, l, e, s], dim=1)    # (B, 168)
-        trunk  = self.shared_trunk(fused)            # (B, 64)
+        # 💡 [수정된 부분: 특징 벡터 병합(Concatenate) 구조 반영]
+        # 인자로 들어온 순서에 발맞추어 융합 리스트에 [o, l, ld, e, s] 형태로 라이다가 정확히 포함되었습니다.
+        fused  = torch.cat([o, l, ld, e, s], dim=1)    
+        trunk  = self.shared_trunk(fused)                     
 
-        steering = self.steering_head(trunk)         # (B, 1) ∈ [-1, 1]
-        throttle = self.throttle_head(trunk)         # (B, 1) ∈ [ 0, 1]
+        steering = self.steering_head(trunk)         
+        throttle = self.throttle_head(trunk)         
 
-        return torch.cat([steering, throttle], dim=1)  # (B, 2)
+        return torch.cat([steering, throttle], dim=1)
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -389,16 +431,21 @@ def csv_columns() -> list[str]:
     cols += [f"lane_r{r}c{c}"
              for r in range(GRID_ROWS) for c in range(GRID_COLS)]
     cols += ["ego_steering", "ego_throttle"]
+    
+    # 💡 [추가된 부분: CSV 스키마에 라이다 5개 구역 컬럼 등록]
+    # 학습 데이터셋(CSV)을 저장하거나 읽어올 때 라이다 s0~s4 데이터가 빠짐없이 기록되도록 컬럼 명칭이 추가되었습니다.
+    cols += ["lidar_s0", "lidar_s1", "lidar_s2", "lidar_s3", "lidar_s4"] 
+    
     cols += ["scenario", "target_steering", "target_throttle"]
     return cols
 
 
-def row_to_tensors(row, device=None):
+def row_to_tensors(row, device=None, lidar_sectors=None):
     """
-    Convert a single pandas Series / dict row from the structured CSV into
-    model-ready tensors.
+    Convert a single pandas Series / dict row from the structured CSV (or live feed) into
+    model-ready tensors, including the 5-dim LiDAR tensor.
 
-    Returns (objects, lane, ego, scenario) ready for PlannerModel.forward().
+    Returns (objects, lane, lidar, ego, scenario) ready for PlannerModel.forward().
     """
     obj_vals  = [float(row[f"obj{i}_{f}"])
                  for i in range(N_MAX_OBJECTS)
@@ -406,14 +453,30 @@ def row_to_tensors(row, device=None):
                            "lat_offset", "width_norm", "height_norm", "lane_overlap")]
     lane_vals = [float(row[f"lane_r{r}c{c}"])
                  for r in range(GRID_ROWS) for c in range(GRID_COLS)]
+    
+    # 💡 [추가된 부분: 실시간 센서값 vs CSV 저장값 동적 분기 처리]
+    # 추론(Inference) 시에는 실시간으로 들어오는 라이다 배열(lidar_sectors)을 즉시 텐서로 변환하고,
+    # 오프라인 학습/평가 시에는 CSV 파일에 저장되어 있던 텍스트 컬럼(lidar_s0~s4) 값을 안전하게 읽어옵니다.
+    if lidar_sectors is not None:
+        lidar_vals = [float(v) for v in lidar_sectors]
+    else:
+        lidar_vals = [float(row[f"lidar_s{i}"]) for i in range(5)]
+
     ego_vals  = [float(row["ego_steering"]), float(row["ego_throttle"])]
     scenario  = int(row["scenario"])
 
     kw = {"device": device} if device else {}
 
-    objects_t  = torch.tensor(obj_vals,  dtype=torch.float32, **kw).unsqueeze(0)
-    lane_t     = torch.tensor(lane_vals, dtype=torch.float32, **kw).unsqueeze(0)
-    ego_t      = torch.tensor(ego_vals,  dtype=torch.float32, **kw).unsqueeze(0)
-    scenario_t = torch.tensor([scenario], dtype=torch.long,   **kw)
+    objects_t  = torch.tensor(obj_vals,   dtype=torch.float32, **kw).unsqueeze(0)
+    lane_t     = torch.tensor(lane_vals,  dtype=torch.float32, **kw).unsqueeze(0)
+    
+    # 💡 [추가된 부분: 라이다 텐서 인스턴스 생성]
+    lidar_t    = torch.tensor(lidar_vals, dtype=torch.float32, **kw).unsqueeze(0)  
+    
+    ego_t      = torch.tensor(ego_vals,   dtype=torch.float32, **kw).unsqueeze(0)
+    scenario_t = torch.tensor([scenario], dtype=torch.long,    **kw)
 
-    return objects_t, lane_t, ego_t, scenario_t
+    # 💡 [수정된 부분: 반환값 구조 개편]
+    # 원본은 4개(objects, lane, ego, scenario)를 반환했으나, 
+    # 모델 입력 규격에 맞춰 lidar_t가 포함된 총 5개의 텐서를 반환하도록 변경되었습니다.
+    return objects_t, lane_t, lidar_t, ego_t, scenario_t

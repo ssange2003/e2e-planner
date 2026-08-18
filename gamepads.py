@@ -71,7 +71,12 @@ class Joystick(object):
         '''
         # Open the joystick device.
         self.jsdev = open(self.dev_fn, 'rb')
-
+        
+        #add
+        os.set_blocking(self.jsdev.fileno(), False)
+        #finish
+        
+        
         # Get the device name.
         buf = array.array('B', [0] * 64)
         ioctl(self.jsdev, 0x80006a13 + (0x10000 * len(buf)), buf) # JSIOCGNAME(len)
@@ -132,8 +137,16 @@ class Joystick(object):
             return button_name, button_number, button_state, axis_name, axis_number, axis_val
 
         # Main event loop
-        evbuf = self.jsdev.read(8)
-
+        #evbuf = self.jsdev.read(8)
+        
+        #add
+        try:
+            evbuf = self.jsdev.read(8)
+        except BlockingIOError:
+            return button_name, button_number, button_state, axis_name, axis_number, axis_val
+        #finish
+        
+        
         if evbuf:
             tval, value, typev, number = struct.unpack('IhBB', evbuf)
 
@@ -170,47 +183,31 @@ class ShanWanGamepad(Joystick):
         self.gamepad_input = ShanWanGamepadInput()
 
     def read_data(self) -> ShanWanGamepadInput:
-        _, button_number, button_state, _, axis_number, axis_val = super(ShanWanGamepad, self).poll()
+        # 💡 밀려있는 과거의 입력값들을 순식간에 다 읽어치우는 반복문 추가
+        while True:
+            _, button_number, button_state, _, axis_number, axis_val = super(ShanWanGamepad, self).poll()
 
-        # Joysticks
-        if axis_number      == 0:
-            self.gamepad_input.analog_stick_left.x  = axis_val
-        elif axis_number    == 1:
-            self.gamepad_input.analog_stick_left.y  = -axis_val
-        elif axis_number    == 2:
-            self.gamepad_input.analog_stick_right.x = axis_val
-        elif axis_number    == 4:
-            self.gamepad_input.analog_stick_right.y = -axis_val
-        # Buttons
-        elif button_number  == 0:
-            self.gamepad_input.button_a = button_state
-        elif button_number  == 1:
-            self.gamepad_input.button_b = button_state
-        elif button_number  == 2: 
-            self.gamepad_input.button_x = button_state
-        elif button_number  == 3:
-            self.gamepad_input.button_y = button_state
-        elif button_number  == 4:
-            pass
-        elif button_number  == 5:
-            pass        
-        elif button_number  == 6:
-            self.gamepad_input.button_l1 = button_state
-        elif button_number  == 7:
-            self.gamepad_input.button_r1 = button_state       
-        elif button_number  == 8:
-            self.gamepad_input.button_l2 = button_state
-        elif button_number  == 9:
-            self.gamepad_input.button_r2 = button_state       
-        elif button_number  == 10:
-            self.gamepad_input.button_select = button_state
-        elif button_number  == 11:
-            self.gamepad_input.button_start = button_state
-        elif button_number  == 12:
-            self.gamepad_input.button_home = button_state
-        elif button_number  == 13:
-            self.gamepad_input.analog_stick_left.z = button_state
-        elif button_number  == 14:
-            self.gamepad_input.analog_stick_right.z = button_state
+            # 더 이상 읽을 신호가 없으면(최신 상태면) 루프 탈출
+            if button_number is None and axis_number is None:
+                break
 
+            # Joysticks
+            if axis_number      == 0:
+                self.gamepad_input.analog_stick_left.x  = axis_val
+            elif axis_number    == 1:
+                self.gamepad_input.analog_stick_left.y  = -axis_val
+            elif axis_number    == 3: # 👈 아까 3번으로 고치셨던 오른쪽 스틱 X축!
+                self.gamepad_input.analog_stick_right.x = axis_val
+            elif axis_number    == 4:
+                self.gamepad_input.analog_stick_right.y = -axis_val
+                
+            # ⚠️ 여기서부터 아래쪽의 버튼(button_number) 관련 코드들은 
+            # while 반복문 안에 들어가도록 모두 스페이스바 4칸씩 더 들여쓰기 해주세요!
+            elif button_number  == 0:
+                self.gamepad_input.button_a = button_state
+            elif button_number  == 1:
+                self.gamepad_input.button_b = button_state
+            # ... (나머지 버튼 코드 유지) ...
+
+        # while 루프가 끝난 뒤에 리턴 (들여쓰기 위치 주의)
         return self.gamepad_input

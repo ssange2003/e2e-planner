@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Planner Web Viewer
+Planner Viewer
 ==================
 Self-contained HTTP + WebSocket viewer for the planner scripts.
 No dependency on yolo_web_viewer.py or the obstacle avoidance module.
@@ -130,8 +130,14 @@ _HTML = """<!DOCTYPE html>
   <button id="sc-3" class="sc-btn"        onclick="setScenario(3)">3 Go Straight</button>
   <button id="sc-4" class="sc-btn"        onclick="setScenario(4)">4 Pull Over</button>
   <button id="sc-5" class="sc-btn"        onclick="setScenario(5)">5 Parking</button>
+  <!-- 💡 [추가된 부분: 시나리오 6번 UI 버튼]
+       웹 브라우저 컨트롤 패널에 '6 Custom Spline' 시나리오를 마우스로 클릭해서 
+       즉각적으로 전환할 수 있도록 HTML 버튼 요소를 새롭게 추가했습니다. -->
+  <button id="sc-6" class="sc-btn"        onclick="setScenario(6)">6 Custom Spline</button>
 </div>
-<div id="ctrl">← / → steer (tap=0.3 · hold 300ms=0.6 · hold 600ms=0.9) &nbsp;|&nbsp; ↑ throttle +0.1 &nbsp; ↓ throttle = 0 &nbsp;|&nbsp; Space = record &nbsp;|&nbsp; P = pause &nbsp;|&nbsp; 0-5 = scenario</div>
+<!-- 💡 [변경된 부분: 조작 안내 텍스트 업데이트]
+     하단 조작법 안내 텍스트의 시나리오 단축키 범위를 0-5에서 0-6으로 변경하여 사용자가 명확히 인지할 수 있도록 텍스트를 수정했습니다. -->
+<div id="ctrl">← / → steer (tap=0.3 · hold 300ms=0.6 · hold 600ms=0.9) &nbsp;|&nbsp; ↑ throttle +0.1 &nbsp; ↓ throttle = 0 &nbsp;|&nbsp; Space = record &nbsp;|&nbsp; P = pause &nbsp;|&nbsp; 0-6 = scenario</div>
 
 <script>
 const canvas = document.getElementById('feed');
@@ -285,7 +291,11 @@ document.addEventListener('keydown', (e) => {
   else if (e.key === 'ArrowDown')  { throttle = 0.0; changed = true; }
   else if (e.key === ' ')          { sendRecording(); e.preventDefault(); return; }
   else if (e.key === 'p' || e.key === 'P') { togglePause(); e.preventDefault(); return; }
-  else if (e.key >= '0' && e.key <= '5')  { setScenario(parseInt(e.key)); e.preventDefault(); return; }
+  
+  // 💡 [변경된 부분: 브라우저 키보드 단축키 인식 범위 확장]
+  // 사용자가 키보드 숫자키 '6'을 눌렀을 때도 setScenario(6) 함수가 정상적으로 호출되어
+  // 백엔드로 웹소켓 신호를 쏠 수 있도록 상한선 조건문을 '5'에서 '6'으로 늘렸습니다.
+  else if (e.key >= '0' && e.key <= '6')  { setScenario(parseInt(e.key)); e.preventDefault(); return; }
   if (changed) { e.preventDefault(); sendControl(); }
 });
 
@@ -336,7 +346,11 @@ class PlannerViewer:
     """
 
     STEER_VALUE    = 1.0   # JS and gamepad both output final values directly; no extra scaling
-    FULL_THROTTLE  = 0.35  # maximum throttle value; right stick X and keyboard scale to this
+    
+    # 💡 [변경된 부분: 뷰어 최대 스로틀 값 튜닝]
+    # 키보드(위쪽 화살표)나 게임패드 조작 시 적용되는 최대 스로틀 상한선(FULL_THROTTLE)을
+    # 기존 0.35에서 데이터 수집 스크립트 및 차량 캘리브레이션에 맞추어 0.383으로 상향 조정했습니다.
+    FULL_THROTTLE  = 0.383 # maximum throttle value; right stick X and keyboard scale to this
 
     def __init__(self, http_port: int = 8082, ws_port: int = 8083):
         self._http_port = http_port
@@ -636,7 +650,12 @@ class PlannerViewer:
                         print(f"[PlannerViewer] {state}")
                     elif msg.get('type') == 'scenario_change':
                         sc = int(msg.get('value', 0))
-                        if 0 <= sc <= 5:
+                        
+                        # 💡 [변경된 부분: 백엔드 WebSocket 시나리오 수신 허용 범위 확장]
+                        # 프론트엔드(웹 브라우저)에서 6번 시나리오 전환 요청이 소켓으로 넘어왔을 때, 
+                        # 백엔드(파이썬)가 이를 무시하지 않고 정상적으로 상태 변수(_scenario)에 
+                        # 반영할 수 있도록 필터링 조건문을 0~5에서 0~6으로 변경했습니다.
+                        if 0 <= sc <= 6:
                             with self._lock:
                                 self._scenario = sc
                             from planner_model import SCENARIO_NAMES
