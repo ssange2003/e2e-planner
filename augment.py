@@ -62,7 +62,7 @@ MOTOR_DEAD_ZONE_MAX = 0.85   # 이 미만의 양(+) 스로틀은 모터가 실�
 
 # [실측 확정] 정확히 0.0(진짜 정지/노이즈 후보)과 0.75+(정상 주행) 사이가
 # 이분법적으로 갈리고, 중간값은 거의 없음(course1~3 실측 확인).
-THROTTLE_IDLE_MAX   = 0.75   # 이 이하 = 정지 상태로 취급 (baseline 계산 등에 사용)
+THROTTLE_IDLE_MAX   = 0.73   # 이 이하 = 정지 상태로 취급 (baseline 계산 등에 사용)
 
 # [주의] 라이다 마운트 위치(센서 원점) 기준 거리인지, 범퍼 앞단 기준으로
 # 오프셋 보정된 거리인지 미확인. 오프셋이 있다면 실제 위협 거리가 이 값과
@@ -290,6 +290,42 @@ def apply_hierarchical_intent_filter(df: pd.DataFrame,
         (frame_lidar_threat | camera_obstacle_threat)
         & (throttle_raw >= ZERO_EVENT_THRESH)
     )
+    # ==========================================================
+    # 코너링 deadzone 보정
+    # ==========================================================
+
+    is_safe_front = (
+        (~frame_lidar_threat)
+        & (~camera_obstacle_threat)
+    )
+
+    is_straight = (
+        df["target_steering"].abs() < 0.15
+    )
+
+    mask_corner_intent = (
+        is_safe_front
+        & (~is_straight)
+        & (throttle_raw >= ZERO_EVENT_THRESH)
+        & (throttle_raw < MOTOR_DEAD_ZONE_MAX)
+    )
+
+    corner_orig = throttle_raw.loc[mask_corner_intent]
+
+    throttle_raw.loc[mask_corner_intent] = (
+        MOTOR_DEAD_ZONE_MAX
+        + (
+            corner_orig - ZERO_EVENT_THRESH
+        ) * (
+            (0.92 - MOTOR_DEAD_ZONE_MAX)
+            / (
+                MOTOR_DEAD_ZONE_MAX
+                - ZERO_EVENT_THRESH
+            )
+        )
+    )
+
+# ==========================================================
 
     # ── [3단계] 스무딩 보호 마스크 ──────────────────────────────────────
     is_edge_intent = was_real_stop | is_recovery_launch | is_avoidance_frame
