@@ -536,9 +536,33 @@ def augment(input_files: list, output_csv: Path, seed: int = 42,
 
         temp_df = pd.read_csv(file_path, on_bad_lines='warn')
         temp_df = temp_df.dropna().reset_index(drop=True)
+        # --------------------------------------------------
+        # source 정보
+        # --------------------------------------------------
+
+        temp_df["_src_idx"] = i
+
+        name = file_path.stem.lower()
+
+        if "avoid" in name:
+            temp_df["scenario"] = 1
+
+        elif "stop" in name:
+            temp_df["scenario"] = 2
+
+        elif "recovery" in name:
+            temp_df["scenario"] = 3
+
+        else:
+            temp_df["scenario"] = 0
+
+    # --------------------------------------------------
+
 
         # 파일 간 시계열/보간 오염을 막기 위한 고유 인덱스 부여
         temp_df["_src_idx"] = i
+        #파일 출신을 파악하기 위해 추가
+        temp_df["source_name"] = file_path.stem
         total_new_rows += len(temp_df)
         df_list.append(temp_df)
 
