@@ -60,27 +60,43 @@ from planner_model import (
 # [실측 확정] ESC breakaway 실측값: 0.85 미만은 실제로 차가 움직이지 않음.
 MOTOR_DEAD_ZONE_MAX = 0.85   # 이 미만의 양(+) 스로틀은 모터가 실제로 돌지 않는 구간
 
-# [실측 확정] 실측 데이터에서 0.75 미만 값이 거의 관찰되지 않음.
-THROTTLE_IDLE_MAX   = 0.75   # 이 이하 = 완전 정지 의도 (스로틀 0 취급)
+# [실측 확정] 정확히 0.0(진짜 정지/노이즈 후보)과 0.75+(정상 주행) 사이가
+# 이분법적으로 갈리고, 중간값은 거의 없음(course1~3 실측 확인).
+THROTTLE_IDLE_MAX   = 0.75   # 이 이하 = 정지 상태로 취급 (baseline 계산 등에 사용)
+
 # [주의] 라이다 마운트 위치(센서 원점) 기준 거리인지, 범퍼 앞단 기준으로
 # 오프셋 보정된 거리인지 미확인. 오프셋이 있다면 실제 위협 거리가 이 값과
 # 다를 수 있음 — 마운트 위치 실측 후 검증 필요.
-LIDAR_DANGER_M      = 0.30   # 전방/전측방 장애물 즉각 위협 거리 [m]
-LIDAR_CLEAR_M       = 0.50   # 재출발 시 "길이 열렸다"고 볼 최소 거리 [m]
-# [논리 추론] 게임패드 트리거/스틱은 페달과 달리 해제가 near-binary라
-# 진짜 패닉 브레이크는 1~2프레임 내 -0.3~-0.9 수준으로 떨어짐. 정상 주행
-# 노이즈(±0.05~0.09)와의 간격이 크므로, 오탐 마진 확보를 위해 노이즈
-# 상한에서 더 떨어뜨림. 실측 로그로 노이즈 분산 재확인 시 조정 가능.
-THROTTLE_JERK_BRAKE = -0.20  # 프레임 간 스로틀 급감 → 제동 변곡점
-# [실측 확정] 차선이 명확히 보이는 정상 프레임의 스크린샷 실측 합계가
-# 약 1.24(가려진 셀 포함 추정 1.5~2.0)로 관측됨. 기존 2.0은 이 관측값과
-# 거의 같거나 높아서 정상 프레임도 "차선 안 보임"으로 오판정할 위험이 있어
-# 여유를 두고 하향.
-LANE_VIS_THRESH     = 1.0    # lane grid 72셀 합이 이 값 초과 → 차선 가시
+LIDAR_DANGER_M      = 0.30   # 절대 위협 거리 [m] — 이보다 가까우면 코스 불문 위협
+LIDAR_CLEAR_M       = 0.50   # 절대 상한 [m] — 상대판정도 이 안에서만 유효(과도 오탐 방지)
 
 # [실측 확정] planner_model.py: dist_norm = 실제거리(m) / MAX_DIST_M(5.0)
 # 라이다와 동일한 물리 거리 기준(LIDAR_DANGER_M=0.30m)으로 정확히 환산.
 CAMERA_OBJ_DANGER_NORM = 0.06  # = 0.30m / 5.0 (LIDAR_DANGER_M과 통일)
+
+# ── [신규] Zero-event 기반 판정 상수 ────────────────────────────────
+# [실측 확정] course1(전량 노이즈 확정)/course3(회피기동) 대조 검증 완료.
+# 코스마다 라이다 baseline 거리가 완전히 다름(개활 코스 4m대 vs 협로 0.5m대)
+# 이라 절대값 하나로는 위협을 못 가림 — 그룹별 상대 baseline 비율로 보정.
+ZERO_EVENT_THRESH   = 0.10   # 이 미만만 "zero event" 후보 (0.75는 노이즈 판정선으로 부적합했음)
+LIDAR_RATIO         = 0.6    # baseline 대비 이 비율 미만 & LIDAR_CLEAR_M 이내면 위협으로 인정
+CONTEXT_PAD         = 5      # zero event 전후 컨텍스트 프레임 수 (라이다/카메라 최소거리 탐색 범위)
+
+# [신규][논리 추론, 미검증] 접근 변화율 — "느리지만 꾸준히 다가오는" 장애물은
+# 절대/상대 거리 조건에 안 걸릴 수 있음(예: 0.80→0.45m로 좁아져도 0.45>
+# LIDAR_CLEAR_M(0.50)에 안 걸림 — 정지 직전에야 겨우 걸림). 더 넓은 윈도우로
+# 추세 자체를 봐서 조기 포착. 실측 데이터로 APPROACH_DROP_M 재검증 필요.
+APPROACH_TREND_WINDOW = 15   # 0.5초 @ 30fps — 최소거리 탐색(±5)보다 넓게
+APPROACH_DROP_M       = 0.15 # 이 윈도우 안에서 이만큼 좁아지면 "접근 중"으로 판정
+
+# [신규][미검증] lane visibility 보조 증거 — 문서 지적대로 이전 버전에서
+# 실제 미구현이었던 부분. 정지 원인 증거로는 라이다/카메라보다 약한 신호라
+# ratio를 낮게(엄격하게) 잡아 과탐 방지.
+LANE_VIS_DROP_RATIO  = 0.4   # baseline 대비 이 비율 미만으로 차선 신호가 줄면 보조 증거로 인정
+
+# [실측 확정] steering은 게임패드 디지털 입력이라 {0, +0.9, -0.9}에 93%가
+# 몰려 있음(course1/3 실측) — "코너링"과 "회피조향"이 값으로 구분 안 됨.
+# 그래서 조향은 증거 판정에서 제외하고, 라이다·카메라 증거만으로 판정한다.
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -91,46 +107,63 @@ def apply_hierarchical_intent_filter(df: pd.DataFrame,
                                      smooth_window: int = 5,
                                      group_col: str = "_src_idx") -> pd.DataFrame:
     """
-    [3단계 계층형 의도 융합 라벨 전처리]
-    - 1차: 라이다(s1,s2,s3) 시계열 rolling-min + 카메라(obj valid/dist_norm)
-           근접 위협으로 물리적 위협 감지 (라이다·카메라 = 메인 판단 주체)
-    - 2차: 스로틀 jerk/정지 상태로 긴급 제동·재출발 엣지 판별, 조향 잔떨림 스무딩
-           (throttle/steering = 서브, 타이밍 보정용)
-    - 3차: lane grid 가시성 회복 + 라이다 클리어런스 + 카메라 클리어로
-           탈출 엣지 완성
+    [Zero-event 기반 계층형 의도 필터]
 
-    엣지 프레임의 target_throttle 원본을 보존하고, 후속 dead-zone 보간에서
-    제외할 수 있도록 df["_edge_protect"] (0/1) 컬럼을 남긴다.
+    기존의 "throttle < 0.75 = 노이즈 후보 / 2초 캡 / steering excursion" 방식은
+    실측 검증 결과 다음 문제가 확인되어 폐기됨:
+      - 0.75는 실제 노이즈 판정선이 아니라 정지/주행 이분법 경계일 뿐이었음
+        (0~0.75 사이 매끄러운 전환값을 노이즈로 오인해 삭제할 위험)
+      - 고정 프레임 캡(60)은 물리적 근거와 무관해 진짜 정지도 지울 수 있었음
+      - steering excursion은 게임패드가 디지털 입력({0,+0.9,-0.9})이라
+        코너링과 회피조향을 구분 못 함 (course1 확정 노이즈에서도 0.9 관측됨)
+
+    새 방식: throttle이 거의 0(< ZERO_EVENT_THRESH)인 연속 구간을
+    "zero event"로 묶고, 이벤트 단위로 라이다/카메라 물리적 증거를 검사한다.
+      - 증거 있음(라이다 절대/상대 위협 또는 카메라 위협) → 원본 보존
+      - 파일 시작/끝에 걸침(보간 불가) → 원본 보존
+      - 증거 없음 & 경계 아님 → 노이즈로 판정, 선형보간
+
+    course1(전량 노이즈로 확정된 실측 데이터)과 course3(장애물 회피 실측
+    데이터)로 교차검증 완료 — course1의 비경계 이벤트 전부가 정확히
+    노이즈로, course3는 라이다 증거 유무로 내부 일관되게 분류됨.
+
+    라이다 baseline은 그룹(파일)별로 다르므로(개활 코스 4m대 vs 협로
+    0.5m대) 상대 비율(LIDAR_RATIO)과 절대 상한(LIDAR_CLEAR_M)을 함께
+    적용해 코스 스케일에 관계없이 동작하도록 함.
+
+    모든 시계열 연산은 group_col(파일별) 안에서만 수행되어 파일 경계
+    오염이 없다.
     """
     if group_col not in df.columns:
         df = df.copy()
         df[group_col] = 0
+    grp = df[group_col]
 
-    # ── [1단계: 라이다 시계열 퍼셉션 필터] ────────────────────────────────
-    # s1(좌전방), s2(정면), s3(우전방)의 최단거리를 파일별로 rolling-min.
-    # 센서 출력은 미터 단위, 결측/무한대는 5.0m로 채워져 들어온다.
+    # ── 라이다 시계열 (rolling-min으로 센서 노이즈 스무딩) ────────────
     lidar_cols = ["lidar_s1", "lidar_s2", "lidar_s3"]
     if all(c in df.columns for c in lidar_cols):
         dist_min = df[lidar_cols].min(axis=1)
         dist_smooth = (
-            dist_min.groupby(df[group_col], group_keys=False)
+            dist_min.groupby(grp, group_keys=False)
                     .apply(lambda s: s.rolling(smooth_window, center=True,
                                                min_periods=1).min())
         )
-        # 접근 변화율(음수 = 장애물이 가까워지는 중) — 파일 경계에서 diff 차단
-        dist_delta = dist_min.groupby(df[group_col]).diff().fillna(0.0)
     else:
         dist_smooth = pd.Series(999.0, index=df.index)
-        dist_delta  = pd.Series(0.0, index=df.index)
-
-    is_closing_in = dist_delta < 0.0   # 장애물 접근 중
-
-    # ── [1단계 확장: 카메라 장애물(YOLO) 근접 위협] ──────────────────────
-    # lane grid(차선 가시성)와는 별개 채널. obj{i}_valid + dist_norm으로
-    # "카메라가 가까운 장애물을 실제로 보고 있는가"를 직접 판정한다.
+    # ── 차선 가시성 (lane grid 72셀 합) — 보조 증거 및 recovery 신호용 ────
+    # [주의] 문서 지적대로 이전 버전에서 실제 미구현이었던 부분. 라이다/
+    # 카메라보다 약한 신호로 취급(LANE_VIS_DROP_RATIO를 낮게 잡음).
+    lane_cols = [f"lane_r{r}c{c}" for r in range(GRID_ROWS) for c in range(GRID_COLS)]
+    if all(c in df.columns for c in lane_cols):
+        lane_sum = df[lane_cols].sum(axis=1)
+    else:
+        lane_sum = pd.Series(np.nan, index=df.index)
+    # ── 카메라 장애물(YOLO) 근접 위협 ─────────────────────────────────
+    # [주의] 실측 4개 코스 전부에서 obj_valid가 거의(0~5/4190) 발생하지
+    # 않아 이 신호는 현재 실질적으로 비활성 상태. 향후 카메라 파이프라인이
+    # 개선되면 자동으로 다시 유효해지도록 로직은 유지.
     obj_valid_cols = [f"obj{i}_valid" for i in range(N_MAX_OBJECTS)]
     obj_dist_cols  = [f"obj{i}_dist_norm" for i in range(N_MAX_OBJECTS)]
-
     if all(c in df.columns for c in obj_valid_cols + obj_dist_cols):
         valid_mat = df[obj_valid_cols].to_numpy() > 0.5
         dist_mat  = df[obj_dist_cols].to_numpy()
@@ -141,138 +174,140 @@ def apply_hierarchical_intent_filter(df: pd.DataFrame,
     else:
         camera_obstacle_threat = pd.Series(False, index=df.index)
 
-    # ── [2단계: 조향 및 스로틀 궤적 / 기구학적 의도 필터] ─────────────────
+    # ── 조향: 잔떨림만 스무딩 (증거 판정에는 미사용 — 위 상수 설명 참고) ──
     steering_raw = df["target_steering"].copy()
     throttle_raw = df["target_throttle"].copy()
-
-    # 조향: 잔떨림만 스무딩 (augment() 본문의 조향 스무딩은 제거됨 — 여기가 유일)
     if smooth_window > 1:
         df["target_steering"] = (
-            steering_raw.groupby(df[group_col], group_keys=False)
+            steering_raw.groupby(grp, group_keys=False)
                         .apply(lambda s: s.rolling(smooth_window, center=True,
                                                    min_periods=1).mean())
                         .clip(-1.0, 1.0)
         )
 
-    # 스로틀 jerk / 정지 상태 — 모두 파일별로 계산
-    throttle_jerk    = throttle_raw.groupby(df[group_col]).diff().fillna(0.0)
-    prev_throttle    = throttle_raw.groupby(df[group_col]).shift(1).fillna(0.0)
-    is_stopped_state = prev_throttle < THROTTLE_IDLE_MAX
+    # ── [1단계] Zero event 검출 및 그룹별 baseline 계산 ────────────────
+    is_near_zero = throttle_raw < ZERO_EVENT_THRESH
+    run_change = (
+        is_near_zero.groupby(grp, group_keys=False)
+                    .apply(lambda s: s.ne(s.shift()).cumsum())
+    )
+    event_key = grp.astype(str) + "_" + run_change.astype(str)
+    event_key = event_key.where(is_near_zero)
 
-    # 긴급 제동 엣지: 라이다/카메라가 위협을 확정한 상태에서
-    # 스로틀을 급격히 떨구는 변곡점.
-    # - 즉각 위험(<0.40m): 접근 여부 무관, 거리 자체가 위협
-    # - 경계 구간(0.40~0.65m): "접근 중"일 때만 위협 (정지 장애물 스침 오탐 방지)
-    #   ※ 기존 코드는 LIDAR_DANGER_M < LIDAR_CLEAR_M라서 이 구간 분리가
-    #      안 돼 있었고, is_closing_in이 판정에 전혀 영향을 못 주는
-    #      죽은 조건이었음 — 아래에서 분리해 실제로 작동하게 함.
-    is_immediate_danger = (
-        (dist_smooth < LIDAR_DANGER_M) & (throttle_jerk < THROTTLE_JERK_BRAKE)
+    # 그룹(파일)별 "정상 주행" 라이다/차선 baseline — 코스 스케일 보정용
+    driving_mask = throttle_raw > THROTTLE_IDLE_MAX
+    baseline_by_group = (
+        dist_smooth[driving_mask].groupby(grp[driving_mask]).median()
     )
-    is_approaching_zone = (
-        is_closing_in
-        & (dist_smooth < LIDAR_CLEAR_M)
-        & (throttle_jerk < THROTTLE_JERK_BRAKE)
-    )
-    is_emergency_braking = (
-        is_immediate_danger | is_approaching_zone | camera_obstacle_threat
+    lane_baseline_by_group = (
+        lane_sum[driving_mask].groupby(grp[driving_mask]).median()
     )
 
-    # ── [신규] 순간 0값(손 떨림) 필터 ──────────────────────────────────
-    # 정지 의도가 아닌데 손이 미끄러져 짧게 0 근처로 찍히는 경우를
-    # 실제 정지(장애물/의도적 정차)와 구분한다.
-    # [주의] 30 FPS 로깅 가정 → 2초 = 60프레임. 실측 데이터로 "의도적
-    # 2초 정지" 케이스가 오탐되지 않는지 검증 필요(손 떨림은 보통 1~5프레임).
-    TRANSIENT_ZERO_MAX_FRAMES = 60   # 2초 @ 30 FPS
-    # [변경] 0.05 → 0.75. 더 이상 "0에 가까운 값"만이 아니라 "정상 주행
-    # 임계 미만 전체(저속 포함)"를 손 떨림 후보로 본다는 뜻이라 이름을
-    # LOW_THROTTLE_NOISE_THRESH로 명확히 함. THROTTLE_IDLE_MAX(0.6)보다도
-    # 높아서, 이전에 "정지 의도"로 분류되던 0.6~0.75 구간까지 이 필터가
-    # 건드리게 됨 — 저속 주행 구간이 통째로 보간될 위험이 커졌다는 뜻.
-    LOW_THROTTLE_NOISE_THRESH = 0.75
+    is_transient_noise = pd.Series(False, index=df.index)
+    is_event_evidence  = pd.Series(False, index=df.index)
+    is_event_boundary  = pd.Series(False, index=df.index)
 
-    def _zero_run_length(s: pd.Series) -> pd.Series:
-        is_zero = s < LOW_THROTTLE_NOISE_THRESH
-        change = is_zero.ne(is_zero.shift()).cumsum()
-        run_len = is_zero.groupby(change).transform('size')
-        return run_len.where(is_zero, 0)
+    # 이벤트 단위 판정 (그룹별 순회 — 데이터 규모상 파이썬 루프로 충분히 빠름)
+    for gid, sub in df.groupby(grp):
+        idx = sub.index
+        gsize = len(idx)
+        base_d = baseline_by_group.get(gid, LIDAR_CLEAR_M)
+        base_lane = lane_baseline_by_group.get(gid, np.nan)
+        ev_ids = event_key.loc[idx].dropna().unique()
+        for eid in ev_ids:
+            ev_idx = idx[event_key.loc[idx] == eid]
+            local_s = idx.get_loc(ev_idx.min())
+            local_e = idx.get_loc(ev_idx.max())
+            is_boundary = (local_s == 0) or (local_e == gsize - 1)
 
-    zero_run_len = (
-        throttle_raw.groupby(df[group_col], group_keys=False)
-                    .apply(_zero_run_length)
-    )
+            ps = idx[max(0, local_s - CONTEXT_PAD)]
+            pe = idx[min(gsize - 1, local_e + CONTEXT_PAD)]
+            dmin = dist_smooth.loc[ps:pe].min()
+            cam_hit = bool(camera_obstacle_threat.loc[ps:pe].any())
 
-    # 물리적 근거(라이다/카메라 위협)가 없는데 짧게(<=2초)만 0이면 → 노이즈
-    is_transient_zero = (
-        (zero_run_len > 0) & (zero_run_len <= TRANSIENT_ZERO_MAX_FRAMES)
-        & (~camera_obstacle_threat)
-        & (dist_smooth > LIDAR_CLEAR_M)
-    )
+            # 접근 변화율: 이벤트 시작 이전 더 넓은 윈도우(±더 큼)에서
+            # 거리가 꾸준히 좁혀졌는지 확인 — 절대/상대 거리에 안 걸려도
+            # "느리지만 다가오는" 장애물을 조기에 잡기 위함.
+            trend_s = idx[max(0, local_s - APPROACH_TREND_WINDOW)]
+            pre_window_start_dist = dist_smooth.loc[trend_s]
+            approach_drop = pre_window_start_dist - dmin
+            is_approaching = approach_drop > APPROACH_DROP_M
 
-    # 노이즈 프레임은 "정지 상태"로 취급하지 않음 → 다음 프레임의 허위 recovery_launch 방지
-    is_stopped_state = is_stopped_state & (~is_transient_zero.shift(1, fill_value=False))
+            # 차선 가시성 보조 증거 (약한 신호 — 단독으로는 과탐 방지 위해
+            # 엄격한 비율만 인정). [실측 확정] ±CONTEXT_PAD 윈도우+최소값
+            # 방식은 이벤트와 무관한 인접 프레임의 일시적 카메라 글리치를
+            # 잡아내 오탐을 냄(course1 frame 25-26 검증에서 확인) — 반드시
+            # 이벤트 구간 자체의 평균으로 좁혀야 함.
+            lane_hit = False
+            if not np.isnan(base_lane) and base_lane > 0:
+                lane_event_mean = lane_sum.loc[ev_idx].mean()
+                lane_hit = lane_event_mean < LANE_VIS_DROP_RATIO * base_lane
 
-    # 노이즈 프레임 자체는 선형 보간으로 채움 (엣지 보호 대상과 무관하게 먼저 정리)
-    throttle_raw = throttle_raw.mask(is_transient_zero)
+            evidence = (
+                (dmin < LIDAR_DANGER_M)
+                or (dmin < LIDAR_RATIO * base_d and dmin < LIDAR_CLEAR_M)
+                or (is_approaching and dmin < LIDAR_CLEAR_M)
+                or cam_hit
+                or lane_hit
+            )
+
+            if is_boundary:
+                is_event_boundary.loc[ev_idx] = True
+            elif evidence:
+                is_event_evidence.loc[ev_idx] = True
+            else:
+                is_transient_noise.loc[ev_idx] = True
+
+    # ── 노이즈로 판정된 이벤트만 선형보간 (증거/경계 이벤트는 원본 보존) ──
+    throttle_raw = throttle_raw.mask(is_transient_noise)
     throttle_raw = (
-        throttle_raw.groupby(df[group_col])
-                    .transform(lambda s: s.interpolate(method="linear", limit_direction="both"))
+        throttle_raw.groupby(grp)
+                    .transform(lambda s: s.interpolate(method="linear",
+                                                       limit_direction="both"))
     )
 
-    n_transient = int(is_transient_zero.sum())
-    print(f"[AUG] 손 떨림성 순간 0값 필터(<= {TRANSIENT_ZERO_MAX_FRAMES}프레임/2초): "
-          f"{n_transient}개 프레임 보간 처리")
-
-    # ── [3단계: 카메라 차선 가시성 회복 필터] ────────────────────────────
-    # obj{i}_valid는 YOLO '장애물 검출' 플래그이므로 차선 가시성에 쓰지 않는다.
-    # 차선 가시성은 lane grid 72셀(각 셀 = 차선 픽셀 비율)의 합으로 판단.
-    lane_cols = [f"lane_r{r}c{c}" for r in range(GRID_ROWS) for c in range(GRID_COLS)]
-    if all(c in df.columns for c in lane_cols):
-        cam_visibility = (df[lane_cols].sum(axis=1) > LANE_VIS_THRESH).astype(float)
-    else:
-        cam_visibility = pd.Series(1.0, index=df.index)
-
-    lane_reappearing = cam_visibility.groupby(df[group_col]).diff().fillna(0.0) > 0
-
-    # 재출발(탈출) 엣지: 멈춰 있던 상태에서 (차선 회복 OR 라이다 클리어)와 함께
-    # 모터가 실제로 돌기 시작하는 breakaway 이상으로 스로틀을 감아올리는 순간.
-    # 카메라가 여전히 근접 장애물을 보고 있으면 재출발 보류 (신규 조건).
-    is_accelerating   = throttle_raw > MOTOR_DEAD_ZONE_MAX
+    # ── [2단계] 재출발(recovery) 엣지 ──────────────────────────────────
+    # 증거 있는 정지(혹은 경계) 이벤트가 끝난 직후, 스로틀이 breakaway를
+    # 다시 넘기는 시점을 재출발로 표시 — 그룹별 shift로 파일 경계 보호.
+    was_real_stop = is_event_evidence | is_event_boundary
+    was_real_stop_prev = was_real_stop.groupby(grp).shift(1, fill_value=False)
     is_recovery_launch = (
-        is_stopped_state & is_accelerating
-        & (lane_reappearing | (dist_smooth > LIDAR_CLEAR_M))
-        & (~camera_obstacle_threat)
+        was_real_stop_prev & (throttle_raw > MOTOR_DEAD_ZONE_MAX) & (~was_real_stop)
     )
 
-    # ── 종합 엣지 보호 마스크 ────────────────────────────────────────────
-    # 엣지 이웃 프레임까지 보호를 확장(±(window//2)) — 스무딩 윈도우가
-    # 엣지 직전/직후 프레임을 통해 엣지 값을 간접 훼손하는 것을 방지.
-    is_edge_intent = (is_emergency_braking | is_recovery_launch)
+    # ── [신규] 비정지 회피(non-zero avoidance) 프레임 보호 ────────────────
+    # [문서 지적사항 반영] zero-event만 보면 "스로틀은 유지한 채 장애물을
+    # 피해간" 회피기동은 아예 감지 대상이 아니라서, 그냥 일반 스무딩을
+    # 그대로 맞아 궤적이 흐려질 수 있었음. 프레임 단위로 라이다/카메라
+    # 위협이 있으면서 스로틀이 살아있는(정지 이벤트가 아닌) 프레임을
+    # 별도로 보호한다. steering은 게임패드 디지털 입력이라 판정에 안 씀.
+    frame_baseline = grp.map(baseline_by_group).fillna(LIDAR_CLEAR_M)
+    frame_lidar_threat = (
+        (dist_smooth < LIDAR_DANGER_M)
+        | ((dist_smooth < LIDAR_RATIO * frame_baseline) & (dist_smooth < LIDAR_CLEAR_M))
+    )
+    is_avoidance_frame = (
+        (frame_lidar_threat | camera_obstacle_threat)
+        & (throttle_raw >= ZERO_EVENT_THRESH)
+    )
+
+    # ── [3단계] 스무딩 보호 마스크 ──────────────────────────────────────
+    is_edge_intent = was_real_stop | is_recovery_launch | is_avoidance_frame
     pad = max(1, smooth_window // 2)
     is_edge_protected = (
         is_edge_intent.astype(float)
-                      .groupby(df[group_col], group_keys=False)
+                      .groupby(grp, group_keys=False)
                       .apply(lambda s: s.rolling(2 * pad + 1, center=True,
                                                  min_periods=1).max())
     ) > 0.5
 
-    # 일반 주행 구간의 스로틀을 0.94 "바닥값"으로 보정 (고정 오버라이드 아님)
-    # ─────────────────────────────────────────────────────────────────
-    # [설계 변경] 이전엔 정상 주행 프레임 전부를 0.94로 덮어써서 코너/직선
-    # 간 사람의 실제 속도 변화(=MSE 회귀가 배워야 할 신호)가 소실됐음.
-    # 이제는 0.94 미만인 소극적 프레임만 끌어올리고, 0.94 이상인 값(사람이
-    # 더 강하게 밟은 구간)은 원본을 그대로 보존해 속도 변화 정보를 유지함.
-    NORMAL_DRIVE_BOOST_FLOOR = 0.94
-    is_normal_driving = (~is_emergency_braking) & (~is_stopped_state) & (throttle_raw > THROTTLE_IDLE_MAX)
-    is_below_floor = is_normal_driving & (throttle_raw < NORMAL_DRIVE_BOOST_FLOOR)
-
-    # np.where 대신 pandas의 mask나 where를 사용하여 Series 형식 보존
-    throttle_raw = throttle_raw.mask(is_below_floor, NORMAL_DRIVE_BOOST_FLOOR)
-
-    # ── 조건부 스로틀 스무딩: 엣지는 원본 사수, 일반 구간만 평활화 ────────
+    # [설계 변경] NORMAL_DRIVE_BOOST_FLOOR(구 0.94 고정/floor 보정) 제거.
+    # 실측 검증 결과 이 보정은 "noise 제거"가 아니라 정상 주행의 자연스런
+    # 속도 변화(코너 감속/직선 가속) 정보를 삭제하는 별개의 작업이었음
+    # (문서 §13). MSE 회귀가 배워야 할 신호이므로 원본을 그대로 둔다.
     if smooth_window > 1:
         smoothed_throttle = (
-            throttle_raw.groupby(df[group_col], group_keys=False)
+            throttle_raw.groupby(grp, group_keys=False)
                         .apply(lambda s: s.rolling(smooth_window, center=True,
                                                    min_periods=1).mean())
         )
@@ -281,23 +316,23 @@ def apply_hierarchical_intent_filter(df: pd.DataFrame,
     else:
         df["target_throttle"] = throttle_raw
 
-    # dead-zone 보간 단계와 공유할 보호 마스크
     df["_edge_protect"] = is_edge_protected.astype(int)
 
-    # ─────────────────────────────────────────────────────────────────
-    # [출력 위치] 필터링 결과 및 0.94 오버라이드 통계 프린트
-    # ─────────────────────────────────────────────────────────────────
-    n_brake    = int(is_emergency_braking.sum())
+    n_noise    = int(is_transient_noise.sum())
+    n_evidence = int(is_event_evidence.sum())
+    n_boundary = int(is_event_boundary.sum())
     n_launch   = int(is_recovery_launch.sum())
-    n_prot     = int(is_edge_protected.sum())
-    n_override = int(is_below_floor.sum())
-    n_cam_threat = int(camera_obstacle_threat.sum())
+    n_cam_hit  = int(camera_obstacle_threat.sum())
+    n_avoid    = int(is_avoidance_frame.sum())
 
-    print(f"[AUG] 계층형 의도 융합: 긴급제동 {n_brake} / 재출발 {n_launch} "
-          f"→ 보호 프레임 {n_prot} (이웃 ±{pad} 포함)")
-    print(f"[AUG] 카메라 근접 위협 판정 프레임 수: {n_cam_threat}")
-    print(f"[AUG] 일반 주행 0.94 미만 → floor 보정 적용된 프레임 수: {n_override}")
-    # ─────────────────────────────────────────────────────────────────
+    print(f"[AUG] Zero-event 분류: 노이즈(보간) {n_noise} / "
+          f"증거있음(보존) {n_evidence} / 파일경계(보존) {n_boundary} 프레임")
+    print(f"[AUG] 재출발(recovery) 프레임: {n_launch}")
+    print(f"[AUG] 비정지 회피(non-zero avoidance) 보호 프레임: {n_avoid}")
+    print(f"[AUG] 카메라 근접 위협 판정 프레임 수: {n_cam_hit} "
+          f"(실측상 obj_valid 거의 미발생 — 사실상 비활성 상태)")
+    print(f"[AUG] NORMAL_DRIVE_BOOST_FLOOR 비활성화 — 정상 주행 throttle 변동폭 원본 보존")
+
     return df
 
 
@@ -501,28 +536,11 @@ def augment(input_files: list, output_csv: Path, seed: int = 42,
         print(f"      Thtl  std {thtl_raw_std:.4f} → {df['target_throttle'].std():.4f}")
         print()
 
-    # ── 모터 죽은 구간(dead zone) 스무딩 ──
-    # 주행 의도는 있지만(throttle > 0.05) ESC breakaway(MOTOR_DEAD_ZONE_MAX)에
-    # 못 미쳐 차가 사실상 멈춰 있는 구간을 선형 보간으로 램프 처리.
-    # 단, 계층형 필터가 보호한 엣지 프레임(긴급제동/재출발의 과도 구간)은
-    # 인간의 원본 의도이므로 보간 대상에서 제외한다.
-    dead_zone_mask = (
-        (df["target_throttle"] > THROTTLE_IDLE_MAX)
-        & (df["target_throttle"] < MOTOR_DEAD_ZONE_MAX)
-        & (df["_edge_protect"] < 0.5)          # ← 엣지 보호 프레임 제외
-    )
-    n_dead = int(dead_zone_mask.sum())
-
-    if n_dead > 0:
-        masked = df["target_throttle"].mask(dead_zone_mask)
-        df["target_throttle"] = (
-            masked.groupby(df["_src_idx"])
-                  .transform(lambda s: s.interpolate(method="linear",
-                                                     limit_direction="both"))
-        )
-
-    print(f"[AUG] 모터 죽은 구간({THROTTLE_IDLE_MAX} < throttle < {MOTOR_DEAD_ZONE_MAX}) "
-          f"스무딩: {n_dead}개 행 보간 처리 (엣지 보호 프레임 제외)")
+    # [설계 변경] 기존 "0.75~0.85 구간 무조건 보간" 블록 제거.
+    # 문서 §14 지적대로, 이 구간(ESC breakaway 전이 구간)은 노이즈가
+    # 아니라 정지→재출발 궤적의 일부일 수 있어 무조건 지우면 안 됨.
+    # apply_hierarchical_intent_filter의 zero-event 판정(ZERO_EVENT_THRESH
+    # 미만만 후보로 삼고 증거 유무로 분류)이 이미 이 역할을 대신한다.
     print("-" * 65)
 
     # 내부 작업 컬럼 제거 (스키마 밖 컬럼이 증강/저장으로 새지 않게)
