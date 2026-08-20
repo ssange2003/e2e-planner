@@ -91,6 +91,24 @@ MAX_DIST_M     = 5.0    # clip distances beyond this to 1.0
 # 원본 코드의 0.35에서 실제 수집 및 주행 캘리브레이션에 맞춘 0.383으로 미세 조정되었습니다.(add modify 0.36)
 MAX_THROTTLE   = 0.41 
 
+# 💡 [추가된 부분: D435i IMU 파생 특징 정의]
+# 게임패드 데드존이 만들어내는 "의도하지 않은 throttle=0"과 운전자가 실제로
+# 멈춘 진짜 정지를 구분하려면, 차가 물리적으로 움직이는지를 직접 봐야 합니다.
+# 라이다/카메라는 글리치 순간의 바깥 장면이 정상 주행과 동일하기 때문에
+# 원리적으로 이 둘을 구분할 수 없습니다. IMU만이 자차 운동을 직접 관측합니다.
+#
+# [중요] 이 컬럼들은 csv_columns() 스키마에 포함되지 않습니다. 기존에 수집된
+# CSV(IMU 없음)와 새로 수집할 CSV(IMU 있음)를 모두 읽을 수 있어야 하기 때문입니다.
+# train_planner.py 의 스키마 검증은 부분집합 검사(missing = expected - actual)라
+# 컬럼이 더 있어도 통과하며, 모델 입력은 컬럼명을 직접 지정해 만들므로
+# 이 컬럼을 추가해도 모델 구조 변경도 재학습도 필요하지 않습니다.
+IMU_COLUMNS = [
+    "imu_motion",      # 최근 윈도우 |accel| 표준편차 — 노면 진동 = 이동 중인가
+    "imu_yaw_rate",    # 수직축 gyro [rad/s] — 실제 회전 각속도
+    "imu_accel_fwd",   # 전방축 accel [m/s^2] — 실제 감속이 있었는가
+]
+IMU_FEATURES = len(IMU_COLUMNS)
+
 FRAME_W        = 848    # must match camera config — RealSense supported: 848x480, 640x480, 640x360
 FRAME_H        = 480
 N_YOLO_CLASSES = 80     # COCO classes; override if using custom model
@@ -438,6 +456,14 @@ def csv_columns() -> list[str]:
     
     cols += ["scenario", "target_steering", "target_throttle"]
     return cols
+
+
+# 💡 [추가된 부분: IMU 확장 스키마]
+# 수집(collect_data_planner.py)은 이 확장 스키마로 헤더를 쓰고,
+# 학습/증강은 기존 csv_columns() 로 검증하므로 양쪽 모두 호환됩니다.
+def csv_columns_ext() -> list[str]:
+    """기본 스키마 + IMU 파생 컬럼. 수집 단계에서만 사용합니다."""
+    return csv_columns() + IMU_COLUMNS
 
 
 def row_to_tensors(row, device=None, lidar_sectors=None):

@@ -7,6 +7,13 @@ scenario.py — 파일명 prior + 센서 증거 → 최종 시나리오 분류
   파일명이 stop/recovery인데 센서 증거가 없다  → 보존 쪽으로 승격 (prior 채택)
   파일명이 normal인데 센서 증거가 강하다        → 증거를 존중해 보존 (prior 무시)
 
+[IMU 우선 원칙]  💡 추가
+D435i IMU 가 있는 파일에서는 "차가 실제로 움직였는가"가 다른 모든 증거보다
+우선한다. throttle=0 인데 차가 굴러가고 있었다면 그건 정의상 정지가 아니라
+게임패드 데드존이 만든 글리치이기 때문이다. 이때 라이다 증거는 의미가 없다
+— 장애물 앞을 관성으로 지나가는 중일 수도 있고, 그것도 정지는 아니다.
+IMU 가 없는 파일에서는 이 분기가 통째로 비활성화되어 기존 로직 그대로 돈다.
+
 즉 prior는 "증거가 없어도 보존"하는 방향으로만 작용하고,
 "증거가 있어도 무시"하는 방향으로는 절대 작용하지 않는다.
 사람이 파일명을 잘못 붙였을 가능성이 항상 있으므로, 안전한 쪽
@@ -27,6 +34,7 @@ from config import (
     CONTEXT_PAD, MIN_STOP_FRAMES,
     APPROACH_TREND_WINDOW, APPROACH_DROP_M,
     LANE_VIS_DROP_RATIO, LANE_BASELINE_MIN,
+    IMU_MOTION_THRESH,
     S_CURVE_SIDE_CLOSE_M, S_CURVE_FRONT_OPEN_M,
     S_CURVE_REQUIRED_RATIO, S_CURVE_WINDOW,
     SCENARIO_NORMAL, SCENARIO_NOISE, SCENARIO_AVOIDANCE,
@@ -215,6 +223,29 @@ class ScenarioClassifier:
                 #  - stop/recovery 파일 → 증거 없어도 보존
                 #  - noise 파일 → 증거 있으면 여전히 보존(무시하지 않음)
                 evidence = sensor_evidence or (prior_preserve and not prior_noise)
+
+                # ── 💡 [추가된 부분: IMU 우선 판정] ────────────────────────
+                # 물리적 운동 관측이 모든 간접 추론을 이깁니다.
+                # 이 이벤트 동안 IMU 를 신뢰할 수 있고 차가 실제로 움직이고
+                # 있었다면, throttle=0 은 글리치입니다. 라이다 증거 유무는
+                # 상관없습니다 — 장애물 앞을 관성으로 지나가는 중이었을 수도
+                # 있고, 그것도 "정지" 는 아니기 때문입니다.
+                #
+                # 프레임 단위가 아니라 이벤트 구간의 다수결로 판정합니다.
+                # 정지 직전 감속 구간에는 진동이 남아 있어 한두 프레임이
+                # 움직이는 것처럼 읽힐 수 있기 때문입니다.
+                #
+                # 0.1 ~ 0.5 사이의 애매한 구간은 어느 쪽으로도 확정하지 않고
+                # 기존 라이다 기반 판정(evidence) 을 그대로 둡니다.
+                # IMU 가 없는 파일에서는 imu_usable=False 라 이 블록 전체가
+                # 건너뛰어지고 기존 동작이 100% 유지됩니다.
+                imu_usable = bool(ev["imu_ok"].loc[ev_idx].all())
+                if imu_usable:
+                    moving_ratio = float(ev["is_moving"].loc[ev_idx].mean())
+                    if moving_ratio > 0.5:
+                        evidence = False      # 굴러가는 중 → 글리치 확정
+                    elif moving_ratio < 0.1:
+                        evidence = True       # 실제 정지 → 진짜 STOP 확정
 
                 if is_boundary:
                     out.loc[ev_idx, "is_boundary_event"] = True

@@ -107,6 +107,7 @@ from planner_model import (
     SCENARIO_GO_STRAIGHT, SCENARIO_PULL_OVER, SCENARIO_PARKING,
     SCENARIO_NAMES,
     MAX_THROTTLE,
+    csv_columns_ext, IMU_COLUMNS,   # 💡 [추가됨] IMU 확장 스키마
     FRAME_W, FRAME_H,
 )
 
@@ -115,6 +116,35 @@ from planner_model import (
 # ─────────────────────────────────────────────────────────────────────────────
 BASE_THROTTLE   = 0.10   # auto-forward throttle during collection
 SAVE_FPS        = 10     # max rows written per second
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 💡 [추가된 부분: 스로틀 데드존 히스테리시스 상수]
+# ─────────────────────────────────────────────────────────────────────────────
+# [문제] 기존에는 단일 임계값 하나(0.08)로 데드존을 처리했습니다.
+#     thro_raw = pad_thro if pad_thro > 0.08 else 0.0
+# 이러면 스틱이 임계값 근처에 머무를 때 0 과 비0 을 프레임마다 왕복하고,
+# 그 결과 "운전자는 계속 주행 중인데 라벨만 0" 인 프레임이 기록됩니다.
+#
+# [실측 증거] 수집된 4개 파일 2240행 분석 결과:
+#   - target_throttle 이 정확히 0.0 인 프레임 : 520개 (23.2%)
+#   - 0 초과 최솟값                          : 0.11863
+#   → 0 과 0.119 사이가 완전한 공백. 사람이 아날로그 스틱을 연속으로
+#     조작했다면 이 구간에 값이 깔려 있어야 하므로, 이 공백은 사람이 아니라
+#     데드존 코드가 만든 계단입니다.
+#   - 0 -> 비0 전이 직후 값의 중앙값 : 0.609 / 0.459 / 0.553
+#   → 진짜 재출발이면 0->0.2->0.4 로 올라가야 하는데 한 프레임 만에 0.6 으로
+#     점프합니다. 스틱이 데드존에 빠졌다 복귀한 흔적입니다.
+#
+# [해결] 진입/이탈 임계값을 분리합니다(라이다 DANGER/CLEAR 와 같은 원리).
+#   정지 상태에서 출발하려면 ENGAGE 를 넘어야 하고,
+#   일단 주행이 시작되면 RELEASE 아래로 내려갈 때까지 0 으로 떨어지지 않습니다.
+# 두 값 사이가 히스테리시스 폭이며, 이 폭만큼 채터링이 사라집니다.
+#
+# [주의] 이 값은 조작감을 바꿉니다. 실제로 몰아보시고 조정하세요.
+#   - ENGAGE 를 낮추면 출발이 민감해지고
+#   - RELEASE 를 낮추면 스로틀을 놓아도 더 오래 붙어 있습니다.
+THROTTLE_ENGAGE_TH  = 0.08   # 정지 -> 주행 전환에 필요한 스틱 입력 (기존 값 유지)
+THROTTLE_RELEASE_TH = 0.03   # 주행 -> 정지 전환 임계값 (이 아래로 내려가야 0)
 
 DATA_DIR      = script_dir / "data"
 # 💡 [수정됨] PLANNER_CSV 상수 선언은 출력 파일명을 동적으로 받기 위해 main 함수 내부로 이동되었습니다.
@@ -236,7 +266,11 @@ def _annotate(frame, boxes, distances, class_ids, scenario, steering, throttle, 
 
 def _init_csv(csv_path: Path):
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    expected = csv_columns()
+    # 💡 [수정됨] 기본 스키마 -> IMU 확장 스키마
+    # 기존 CSV(IMU 없음)를 열면 컬럼 수가 달라 자동으로 백업 후 새 파일이
+    # 생성됩니다. 이는 의도된 동작이며, 기존 파일은 .bak 로 보존됩니다.
+    # 학습/증강 쪽은 csv_columns() 부분집합 검사를 쓰므로 양쪽 다 읽힙니다.
+    expected = csv_columns_ext()
 
     if csv_path.exists():
         # Check schema matches current planner_model constants
@@ -270,8 +304,15 @@ def _init_csv(csv_path: Path):
 # 기존에는 카메라와 차량 제어값만 저장했으나, 라이다 센서 기능이 도입됨에 따라
 # 'lidar_feats' 파라미터가 추가되었고, 해당 5구역 데이터를 CSV의 올바른 위치(스키마 순서)에 기록하도록 수정되었습니다.
 def _save_row(writer, fh, frame_id: int, obj_feats: list, lane_feats: list,
-              ego_feats: list, lidar_feats: list, scenario: int, steering: float, throttle: float):
-    """Write one structured row to the CSV."""
+              ego_feats: list, lidar_feats: list, scenario: int, steering: float,
+              throttle: float, imu_feats: list = None):
+    """Write one structured row to the CSV.
+
+    💡 [추가된 부분: imu_feats]
+    [imu_motion, imu_yaw_rate, imu_accel_fwd] 3개 값을 스키마 맨 뒤에 붙입니다.
+    None 이면 0.0 세 개로 채워 컬럼 수를 항상 일정하게 유지합니다
+    (IMU 가 없는 기기에서도 CSV 구조가 깨지지 않도록).
+    """
     # target_throttle is normalised to [0, 1] for training
     throttle_norm = float(throttle) / MAX_THROTTLE
 
@@ -286,6 +327,11 @@ def _save_row(writer, fh, frame_id: int, obj_feats: list, lane_feats: list,
     row.append(scenario)
     row.append(f"{steering:.5f}")
     row.append(f"{throttle_norm:.5f}")
+
+    # 💡 [추가됨] IMU 파생값 3개를 스키마 맨 뒤에 기록
+    imu = imu_feats if imu_feats is not None else [0.0, 0.0, 0.0]
+    row.extend(f"{float(v):.5f}" for v in imu)
+
     writer.writerow(row)
     fh.flush()
 
@@ -442,7 +488,11 @@ def main(web_port: int = 8082, scenario: int = SCENARIO_LANE_FOLLOW, out_csv: st
 
     # ── Camera ───────────────────────────────────────────────────────────────
     print("\n[CAM] Opening RealSense camera...")
-    camera = Camera(width=FRAME_W, height=FRAME_H, enable_depth=True)
+    # 💡 [수정됨] IMU 스트림 활성화 (D435i)
+    # enable_imu=True 는 별도 파이프라인 + 콜백으로 동작하므로
+    # 아래 read_frames() 루프의 타이밍에는 영향을 주지 않습니다.
+    # D435(무印) 처럼 IMU 가 없으면 camera.py 가 경고만 찍고 계속 진행합니다.
+    camera = Camera(width=FRAME_W, height=FRAME_H, enable_depth=True, enable_imu=True)
     depth_scale = camera.depth_scale if camera.depth_scale > 0 else 0.001
 
     # ── Gamepad ──────────────────────────────────────────────────────────────
@@ -491,6 +541,11 @@ def main(web_port: int = 8082, scenario: int = SCENARIO_LANE_FOLLOW, out_csv: st
     
     # 💡 [추가됨] 새롭게 정의한 ESC 모터 후진 필터 인스턴스화
     esc_filter = ESC_DoubleTap()
+
+    # 💡 [추가됨] 스로틀 히스테리시스 상태
+    # True = 현재 주행 중(스로틀이 붙어 있음). 루프를 넘어 유지되어야 하므로
+    # 반드시 루프 바깥에서 초기화합니다.
+    throttle_engaged = False
 
     frame_id       = 1
     saved_count    = 0
@@ -595,7 +650,18 @@ def main(web_port: int = 8082, scenario: int = SCENARIO_LANE_FOLLOW, out_csv: st
                 if btn_a == 1:
                     human_throttle = -0.1 
                 else:
-                    thro_raw = pad_thro if pad_thro > 0.08 else 0.0
+                    # 💡 [수정된 부분: 단일 데드존 -> 히스테리시스 데드존]
+                    # 기존: thro_raw = pad_thro if pad_thro > 0.08 else 0.0
+                    #       임계값 하나뿐이라 경계에서 0 과 비0 을 왕복했습니다.
+                    # 변경: 주행 중이면 RELEASE(0.03) 까지 버티고,
+                    #       정지 상태에서 출발하려면 ENGAGE(0.08) 를 넘어야 합니다.
+                    #       throttle_engaged 는 루프 바깥에서 유지되는 상태입니다.
+                    if throttle_engaged:
+                        thro_raw = pad_thro if pad_thro > THROTTLE_RELEASE_TH else 0.0
+                    else:
+                        thro_raw = pad_thro if pad_thro > THROTTLE_ENGAGE_TH else 0.0
+                    throttle_engaged = thro_raw > 0.0
+
                     THROTTLE_GAIN = 0.368 
                     human_throttle = thro_raw * THROTTLE_GAIN
                 
@@ -670,6 +736,10 @@ def main(web_port: int = 8082, scenario: int = SCENARIO_LANE_FOLLOW, out_csv: st
                     scenario   = cur_scenario,
                     steering   = input_steering,         
                     throttle   = input_throttle,         
+                    # 💡 [추가됨] 저장 직전에 최신 IMU 파생값을 읽어 함께 기록.
+                    # read_imu() 는 공유 변수 조회 + 표준편차 1회라 비용이
+                    # 사실상 0 입니다(수집 예산 100ms 대비 무시 가능).
+                    imu_feats  = list(camera.read_imu()),
                 )
                 frame_id    += 1
                 saved_count += 1

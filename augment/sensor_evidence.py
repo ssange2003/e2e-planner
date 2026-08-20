@@ -22,6 +22,7 @@ from config import (
     CAMERA_EVIDENCE_ENABLED,
     GRID_ROWS, GRID_COLS,
     N_MAX_OBJECTS,
+    IMU_COLS, IMU_MOTION_THRESH, IMU_YAW_THRESH, IMU_ALLZERO_RATIO,
 )
 
 
@@ -46,6 +47,10 @@ def compute_sensor_evidence(df: pd.DataFrame,
       oblique_dist : 전방 사선 s1/s3 (9.7~29.9°) 중 최솟값 — 회피 보조
       cam_threat   : 카메라 근접 장애물 유무 (bool)
       lane_sum     : 차선 grid 72셀 합 (가시성 척도)
+      imu_ok       : 이 프레임의 IMU 값을 신뢰할 수 있는가 (bool)
+      is_moving    : 차가 실제로 움직이는가 (bool) — imu_ok 일 때만 의미 있음
+      is_turning   : 실제 회전 중인가 (bool)
+      accel_fwd    : 전방축 가속도 [m/s^2]
 
     [섹터 선정 근거] 라이다 1000점/360° = 0.36°/idx 로 환산하면
     s1/s3 는 전방 사선(9.7~29.9°)이지 측면이 아니다. 좌우 d[m] 벽에
@@ -115,5 +120,26 @@ def compute_sensor_evidence(df: pd.DataFrame,
         ev["lane_sum"] = df[lane_names].sum(axis=1)
     else:
         ev["lane_sum"] = np.nan
+
+    # ── IMU (D435i) — 있으면 쓰고 없으면 조용히 비활성 ────────────────
+    # [하위 호환] 기존에 수집된 CSV 에는 IMU 컬럼이 아예 없습니다.
+    # 그 경우 imu_ok=False 가 되어 scenario.py 가 자동으로 기존
+    # 라이다 기반 추론으로 폴백합니다. 코드 분기 없이 데이터로 결정됩니다.
+    if all(c in df.columns for c in IMU_COLS):
+        motion = df["imu_motion"].astype(float)
+        # IMU 미탑재 기기에서 0 으로 채워진 파일을 걸러냅니다.
+        # 파일(그룹)별로 판정해야 합니다 — 일부 파일만 IMU 가 있을 수 있습니다.
+        zero_ratio = (motion == 0.0).groupby(grp).transform("mean")
+        ev["imu_ok"] = zero_ratio < IMU_ALLZERO_RATIO
+        ev["is_moving"] = ev["imu_ok"] & (motion > IMU_MOTION_THRESH)
+        ev["is_turning"] = ev["imu_ok"] & (
+            df["imu_yaw_rate"].astype(float).abs() > IMU_YAW_THRESH
+        )
+        ev["accel_fwd"] = df["imu_accel_fwd"].astype(float)
+    else:
+        ev["imu_ok"] = False
+        ev["is_moving"] = False
+        ev["is_turning"] = False
+        ev["accel_fwd"] = 0.0
 
     return ev

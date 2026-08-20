@@ -10,6 +10,8 @@ CASE D: throttle 유지 + 장애물 접근                              → avoi
 CASE E: noise 파일                                              → 학습 데이터 제외
 CASE F: 전방 사선(s1/s3)만 근접                                  → avoidance, STOP 아님
 CASE G: STOP/RECOVERY 프레임                                    → distance_scale 제외
+CASE H: throttle=0 + IMU 이동 중 (게임패드 글리치)              → noise 로 확정
+CASE I: throttle=0 + IMU 정지 (진짜 정지, 장애물 없음)          → 보존
 
 [섹터 규약] 측면 = s0/s4 (29.9~59.8°), 전방 사선 = s1/s3 (9.7~29.9°),
 정면 = s2 (±9.9°). s1/s3 는 측면이 아니므로 STOP 증거로 쓰지 않는다.
@@ -28,7 +30,8 @@ from augmentation import Augmentor
 
 def make_frames(n, front, side_l, side_r, throttle, steering,
                 scenario_type="normal", lane_val=0.02,
-                oblique_l=5.0, oblique_r=5.0):
+                oblique_l=5.0, oblique_r=5.0,
+                imu_motion=None, imu_yaw=0.0, imu_fwd=0.0):
     """테스트용 DataFrame 생성.
 
     side_l/side_r    → lidar_s0/s4 (진짜 측면)
@@ -53,6 +56,14 @@ def make_frames(n, front, side_l, side_r, throttle, steering,
     df["_scenario_type"] = scenario_type
     df["_course_id"] = 1
     df["_source_file"] = f"{scenario_type}_course1.csv"
+
+    # IMU 컬럼은 imu_motion 을 넘겼을 때만 만든다.
+    # None 이면 컬럼 자체가 없어 기존 CSV 와 동일한 상태가 되고,
+    # sensor_evidence 가 imu_ok=False 로 폴백하는지 확인할 수 있다.
+    if imu_motion is not None:
+        df["imu_motion"] = imu_motion
+        df["imu_yaw_rate"] = imu_yaw
+        df["imu_accel_fwd"] = imu_fwd
     return df
 
 
@@ -189,6 +200,38 @@ check("stop/recovery 프레임 존재", n_protected > 0, f"{n_protected} frames"
 check("distance_scale 이 해당 프레임만큼 생략됨",
       a.last_stats["scale_skipped"] == n_protected,
       f"skipped={a.last_stats['scale_skipped']} / expected={n_protected}")
+
+# ── CASE H: throttle=0 인데 IMU 상 차가 굴러가는 중 → 글리치 ────────
+print()
+print("CASE H: throttle=0 + IMU 이동 중 → 게임패드 글리치로 판정되어야 함")
+# 정면에 장애물까지 있는 상황을 일부러 만든다. 라이다만 보면 "진짜 정지"로
+# 오판하기 딱 좋은 조건인데, IMU 가 이를 뒤집는지 확인하는 것이 핵심이다.
+front = np.concatenate([np.full(10, 1.5), np.full(10, 0.25), np.full(20, 1.5)])
+thr = np.concatenate([np.full(10, 0.90), np.full(10, 0.0), np.full(20, 0.90)])
+df = make_frames(40, front=front, side_l=3.0, side_r=3.0,
+                 throttle=thr, steering=0.0, scenario_type="normal",
+                 imu_motion=0.9)          # 계속 진동 = 굴러가는 중
+d = classify(df)
+check("IMU 이동 중이면 noise 로 판정", int(d["is_noise_event"].sum()) >= 10,
+      f"noise={int(d['is_noise_event'].sum())} frames")
+check("STOP 으로 잡히지 않음", int(d["is_stop"].sum()) == 0,
+      f"stop={int(d['is_stop'].sum())}")
+
+# ── CASE I: throttle=0 이고 IMU 상 완전 정지 → 장애물 없어도 보존 ───
+print()
+print("CASE I: throttle=0 + IMU 정지 + 장애물 없음 → 진짜 정지로 보존")
+# 개활지에서 운전자가 그냥 멈춘 상황. 라이다에는 아무 증거가 없어서
+# 기존 로직이라면 노이즈로 지워버렸을 케이스다.
+thr = np.concatenate([np.full(10, 0.90), np.full(10, 0.0), np.full(20, 0.90)])
+mot = np.concatenate([np.full(10, 0.9), np.full(10, 0.0), np.full(20, 0.9)])
+df = make_frames(40, front=4.5, side_l=4.0, side_r=4.0,
+                 throttle=thr, steering=0.0, scenario_type="normal",
+                 imu_motion=mot)
+d = classify(df)
+check("IMU 정지면 장애물 없어도 보존", int(d["is_noise_event"].sum()) == 0,
+      f"noise={int(d['is_noise_event'].sum())} (0이어야 함)")
+check("STOP 으로 검출됨", int(d["is_stop"].sum()) >= 10,
+      f"stop={int(d['is_stop'].sum())} frames")
 
 # ── 파일 경계 누수 검증 ─────────────────────────────────────────────
 print("\nEXTRA: 파일 경계 누수 검증")
