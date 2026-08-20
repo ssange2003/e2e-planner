@@ -100,6 +100,55 @@ Near  [0.2][0.5][1.0][1.0][1.0] … ← nearly centred now
 
 ---
 
+## LiDAR Sector Layout
+
+The RPLidar returns 1000 points over 360°, which `process_lidar_to_5_sectors()`
+collapses into five scalars. Index-to-angle conversion is `0.36° / index`:
+
+| Sector | Index range | Angle | Role |
+|---|---|---|---|
+| `lidar_s0` | 83 – 166 | +29.9° … +59.8° | Left **side** |
+| `lidar_s1` | 27 – 83 | +9.7° … +29.9° | Left **oblique** (front-left) |
+| `lidar_s2` | 972 – 27 | −10.1° … +9.7° | **Front** |
+| `lidar_s3` | 916 – 972 | −30.2° … −10.1° | Right **oblique** |
+| `lidar_s4` | 833 – 916 | −60.1° … −30.2° | Right **side** |
+
+**Why the distinction between side and oblique matters:**
+
+For a wall `d` metres to the side, a ray at angle θ from the forward axis
+reaches it at range `d / sin(θ)`. The closest reading a sector can produce is
+therefore governed by its **largest** angle:
+
+```
+s0 :  d / sin(59.8°)  =  1.16 × d      (true side)
+s1 :  d / sin(29.9°)  =  2.01 × d      (oblique)
+
+s1 always reads 1.73× farther than s0 for the same wall.
+```
+
+Measured on `s_curve_course1.csv`: side `min(s0,s4)` = 0.305 m,
+oblique `min(s1,s3)` = 0.500 m — a ratio of 1.64, matching the 1.73 prediction.
+
+This is why **`SIDE_LIDAR_COLS` must be `s0`/`s4`**. Using `s1`/`s3` as "side"
+makes the S-curve test unsatisfiable: with a 0.45 m threshold, `s1 & s3` fired
+on **0.0%** of frames in every course, while `s0 & s4` fires on **59.0%** in the
+S-curve course and **0.0%** in the open courses.
+
+**Front vs side are answers to different questions:**
+
+```
+FRONT (s2)          "Is my path blocked?"        → STOP evidence
+SIDE  (s0, s4)      "Is the corridor narrow?"    → S-curve / avoidance only
+OBLIQUE (s1, s3)    "Is something cutting in?"   → avoidance only
+```
+
+The paper-cup S-curve has ~40 cm lanes, so the side sectors sit at 0.2–0.4 m
+during *perfectly normal* driving. Feeding them into the STOP test would label
+the entire S-curve as a stop. Only the front sector may promote a zero-throttle
+event to STOP.
+
+---
+
 ## Model Architecture
 
 ```
@@ -127,13 +176,22 @@ e2e-planner/
 │                               import from this in everything else
 │
 ├── collect_data_planner.py   ← Step 1: drive manually and log structured features
-├── augment.py                ← Step 2: synthetically expand the dataset
+├── augment/                  ← Step 2: scenario-aware labelling + augmentation
+│   ├── augment.py            ←   pipeline orchestration + CLI
+│   ├── config.py             ←   every offline threshold, one place
+│   ├── dataset_loader.py     ←   CSV load + filename → scenario prior
+│   ├── sensor_evidence.py    ←   raw sensors → physical facts (no judgement)
+│   ├── scenario.py           ←   prior + evidence → per-frame scenario label
+│   ├── label_processor.py    ←   noise interpolation + protected smoothing
+│   ├── augmentation.py       ←   scenario-aware transforms
+│   ├── imu_check.py          ←   offline IMU calibration check
+│   └── test_pipeline.py      ←   synthetic-case regression suite (23 checks)
 ├── train_planner.py          ← Step 3: train the planner model
 ├── evaluate.py               ← Step 4: offline error metrics + plots
 ├── planner_inference.py      ← Step 5: run the trained model on the vehicle
 │
 ├── lane_seg.py               ← BiSeNet wrapper (loads model directly, no LKAS)
-├── camera.py                 ← RealSense camera wrapper
+├── camera.py                 ← RealSense wrapper (+ D435i IMU, `--imu-check`)
 ├── planner_viewer.py         ← Web viewer for collection and inference
 ├── yolo_config.py            ← YOLO model path and thresholds
 ├── gamepads.py               ← Gamepad / controller input (optional)
@@ -231,32 +289,145 @@ ego_steering | ego_throttle | scenario | target_steering | target_throttle
 
 ### Step 2 — Augment
 
-Expands the dataset ~8× using physically meaningful transforms:
+Augmentation is no longer a single script — it is a five-stage pipeline that
+**classifies what each frame actually was** before deciding how to treat it.
 
 ```bash
-python augment.py
-# or specify paths explicitly:
-python augment.py --input data/planner_data.csv --output data/augmented_data.csv
+PYTHONPATH=. python augment/augment.py --input-dir data --output data/augmented_data.csv
+
+# or list files explicitly:
+PYTHONPATH=. python augment/augment.py --inputs data/normal_course1.csv data/stop_course1.csv
 ```
 
-**What augmentation does:**
+`PYTHONPATH=.` is required because `augment/config.py` imports the shared
+constants from `planner_model.py` in the parent directory.
 
-| Transform | Physical meaning |
+**Pipeline stages:**
+
+```
+CSV ──► DatasetLoader       filename → scenario prior, per-file _src_idx
+    ──► SensorEvidence      raw sensors → physical facts only, no judgement
+    ──► ScenarioClassifier  prior + evidence → per-frame scenario label
+    ──► LabelProcessor      interpolate noise, smooth only unprotected frames
+    ──► Augmentor           scenario-aware transforms
+    ──► Training CSV
+```
+
+Each stage has exactly one responsibility. `SensorEvidence` never decides
+*what a situation is* — it only reports distances and flags, because the same
+"side at 0.25 m" is normal in the S-curve and a threat elsewhere. Only
+`ScenarioClassifier` has the context needed to make that call.
+
+**Filename is the prior.** Files must be named `{scenario}_course{N}.csv`:
+
+| Prefix | Meaning |
 |---|---|
-| Identity | Keep original |
-| Mirror | Horizontal flip — negate lateral offsets, steering, and flip lane grid columns |
-| Distance noise | Simulate RealSense depth noise (σ = 3 cm normalised) |
-| Lateral jitter | Simulate YOLO box jitter |
-| Confidence noise | Simulate varying detection confidence |
-| Object dropout | Simulate a missed detection (one object randomly removed) |
-| Distance scale | Simulate depth calibration drift (±15%) |
-| Mirror + noise | Combination of mirror and distance noise |
+| `normal_` | Ordinary lane-following |
+| `avoidance_` | Steering around an obstacle without stopping |
+| `s_curve_` | Narrow corridor (paper cups) — side sensors close by design |
+| `stop_` | Deliberate full stop in front of an obstacle |
+| `recovery_` | Restart after the obstacle is removed |
+| `noise_` | Deliberately bad driving — excluded from training entirely |
+
+The prior is applied **asymmetrically**. It can only ever *preserve* labels,
+never delete them:
+
+```
+filename says stop, sensors show nothing   →  preserve (trust the human)
+filename says normal, sensors show threat  →  preserve (trust the sensors)
+```
+
+A human can mislabel a file, so the prior is only trusted in the direction that
+cannot destroy data. A frame is never forced into a scenario just because the
+filename said so — `avoidance_course1.csv` measures only 17.5% actual avoidance,
+the rest being ordinary driving before and after the manoeuvre.
+
+**Scenario-aware augmentation:**
+
+| Scenario | Mirror | Distance scale | Rationale |
+|---|---|---|---|
+| `normal`, `s_curve` | Yes | Yes | Fully symmetric, no directional meaning |
+| `avoidance` | **No** | Yes | Which side you passed on *is* the behaviour |
+| `stop`, `recovery` | Yes | **No** | Scaling distance breaks the "how close → why I stopped" link |
+| `noise` | — | — | Dropped from the dataset before augmentation |
+
+Policy is evaluated **per frame, not per file**. Applying it per file cost 742
+rows of mirror augmentation on `avoidance_course1.csv` when only 198 rows were
+genuinely directional.
+
+**Zero-throttle events are classified, not blanket-deleted.**
+
+Frames where throttle drops below `ZERO_EVENT_THRESH` are grouped into events,
+and each event is judged as a whole:
+
+```
+evidence present (front obstacle / approach trend)  →  preserve as STOP
+IMU says the car was still rolling                  →  gamepad glitch, interpolate
+at a file boundary (no context either side)         →  preserve, never guess
+```
 
 **Output:** `data/augmented_data.csv`
 
 ```
-Before: 300 rows  →  After: ~2400 rows  (×8)
+Before: 2240 rows  →  After: ~17600 rows  (×7.9)
+
+normal 1259 · noise 387 · avoidance 160 · s_curve 325 · stop 45 · recovery 64
 ```
+
+Counts are printed at every run — read them. If a `stop_*.csv` file yields zero
+`stop` frames, the classification is wrong and no amount of training will fix it.
+
+---
+
+### Step 2b — Verify IMU Calibration
+
+Only relevant once you have collected data with a **D435i** (the plain D435 has
+no IMU). Skip this if `imu_check.py` reports the columns are missing — the
+pipeline falls back to LiDAR-only evidence automatically.
+
+```bash
+# live check, vehicle stationary — confirms mount axes
+python camera.py --imu-check
+
+# offline check against collected data — confirms thresholds
+python augment/imu_check.py data/normal_course1.csv
+```
+
+**Why the IMU is needed at all:**
+
+A gamepad glitch and a deliberate stop produce *identical* readings on every
+external sensor. The scene ahead of the car is the same in both cases. Only
+ego-motion separates them:
+
+| Situation | throttle | LiDAR / camera | IMU |
+|---|---|---|---|
+| Glitch (still coasting) | 0 | same as normal driving | **motion detected** |
+| Real stop | 0 | same as normal driving | **stationary** |
+
+The IMU is **not integrated** — double-integrating acceleration drifts within
+seconds. Instead `imu_motion` is the standard deviation of `|accel|` over a
+0.2 s window: a rolling car vibrates, a stopped car does not. There is no
+accumulating error because there is no accumulation.
+
+**What to read from `imu_check.py`:**
+
+```
+[2] separation ratio    ≥ 3.0×   → IMU judgement is trustworthy
+                        1.5–3.0× → borderline, choose the threshold carefully
+                        < 1.5×   → vibration cannot separate; consider an encoder
+
+[3] knee of the moving-ratio curve → the real MOTOR_DEAD_ZONE_MAX
+```
+
+Stage `[3]` is the only reliable way to determine ESC breakaway. The throttle
+histogram alone cannot: the 0.825–0.850 bin is the mode of the entire dataset,
+so the current 0.85 threshold sits on top of a peak with no natural gap on
+either side. The IMU answers it directly by showing at which throttle the car
+actually starts moving.
+
+Put the recommended value into `augment/config.py` **before** running Step 2 —
+the shipped `IMU_MOTION_THRESH = 0.15` is a placeholder with no measurement
+behind it.
 
 ---
 
@@ -410,6 +581,99 @@ The annotation overlay shows:
 
 ## Iterating — What to Do When Performance Is Poor
 
+**The car will not move after training (throttle output stuck near zero):**
+
+This is the single failure mode the whole augment pipeline exists to prevent.
+It is a data problem, not a training problem — more epochs make it worse.
+
+*Mechanism.* The gamepad throttle passes through a dead zone in
+`collect_data_planner.py`. With a single threshold, a stick that hovers near the
+boundary snaps to exactly `0.0` and back every frame, while the driver is still
+driving. Measured across 2240 collected rows:
+
+```
+frames at exactly 0.0        520  (23.2%)
+smallest non-zero value      0.11863
+                             ^ nothing at all exists between 0 and 0.119
+```
+
+Continuous human input cannot produce that gap — it is a staircase carved by the
+dead-zone code. The next transition confirms it: after a zero run ends, throttle
+jumps straight to a median of **0.609** in one frame. A real restart ramps
+`0 → 0.4 → 0.7 → 0.95`; a dead-zone artefact snaps back to where the thumb
+already was.
+
+*Why the model then refuses to move.* Those glitch frames are visually and
+geometrically **identical** to the frames around them — same lane grid, same
+LiDAR, same objects. So the dataset now contains contradictory labels on
+effectively identical inputs: "drive at 0.85" and "stop" for the same scene.
+MSE regression has exactly one way to minimise loss against contradictory
+targets — it predicts their mean. With 23% of labels pulled to zero, the
+throttle head collapses toward the floor and the car crawls or stalls.
+
+*Fixes, in order of leverage:*
+
+1. **Stop generating the artefact.** `collect_data_planner.py` now uses a
+   hysteresis dead zone (`THROTTLE_ENGAGE_TH` 0.08 / `THROTTLE_RELEASE_TH` 0.03)
+   so the stick must fall much further to release than it did to engage.
+2. **Filter what already exists.** Step 2 classifies zero-throttle events and
+   interpolates the ones with no physical evidence behind them. Check the
+   `noise` count in the augment output — above ~20% means the dead zone is still
+   too aggressive.
+3. **Measure ego-motion.** With a D435i, the classifier stops guessing: if the
+   car was rolling during a zero-throttle event, it is a glitch regardless of
+   what the LiDAR saw. See Step 2b.
+
+*Diagnosis.* Check the label distribution actually being trained on:
+
+```bash
+python -c "import pandas as pd; d=pd.read_csv('data/augmented_data.csv'); print((d.target_throttle==0).mean())"
+```
+
+Above ~0.10 and the throttle head will be biased low. Also verify the model is
+not simply predicting a constant — if `evaluate.py` shows throttle MAE close to
+the standard deviation of the labels, it has learned the mean and nothing else.
+
+**Real stops and restarts are missing from the dataset:**
+
+`stop` and `recovery` are the two behaviours most easily destroyed by smoothing
+and the hardest to recover afterwards, so they need deliberate collection:
+
+```bash
+python collect_data_planner.py     # save as stop_course1.csv / recovery_course1.csv
+```
+
+Drive the restart **slowly and on purpose** (`0 → 0.4 → 0.7 → 0.85 → 0.95`).
+Ordinary track laps never contain that ramp — every zero-to-motion transition in
+them is a dead-zone artefact instead, which is precisely what gets filtered out.
+
+**Scenario classification depends on the filename instead of the sensors:**
+
+The prior is meant to assist evidence, not replace it. Test by stripping the
+filenames and re-classifying:
+
+```bash
+PYTHONPATH=".;augment" python -c "
+import sys; sys.path.insert(0,'augment')
+from dataset_loader import DatasetLoader
+from sensor_evidence import compute_sensor_evidence
+from scenario import ScenarioClassifier
+import glob
+df = DatasetLoader().load(glob.glob('data/*_course*.csv'))
+ev = compute_sensor_evidence(df, df['_src_idx'], 5)
+df2 = df.copy(); df2['_scenario_type'] = 'normal'
+d = ScenarioClassifier(5).classify(df2, ev)
+for f in df['_source_file'].unique():
+    m = (df['_source_file'] == f).to_numpy()
+    print(f, round(d['is_s_curve'].to_numpy()[m].mean()*100, 1))
+"
+```
+
+An `s_curve_*` file should still score above 60% with the prior removed, and
+`normal_*` files below 5%. If the S-curve file drops to near zero, the geometry
+is not discriminating and the classifier will fail on any new course — this is
+exactly the symptom that exposed the `s1/s3` vs `s0/s4` sector error.
+
 **High steering error on a specific scenario:**
 1. `python evaluate.py` — confirm which scenario is worst in `per_scenario_mae.png`
 2. Collect more data for that scenario: `python collect_data_planner.py --scenario <N>`
@@ -456,3 +720,50 @@ All shared constants live in `planner_model.py`. Change them there and they prop
 | `FRAME_H` | 480 | Camera resolution height |
 | `N_YOLO_CLASSES` | 80 | YOLO class count (COCO default) |
 | `N_SCENARIOS` | 6 | Scenario token vocabulary size |
+| `IMU_COLUMNS` | 3 cols | D435i derived features — **not** part of `csv_columns()` |
+
+`IMU_COLUMNS` is deliberately kept out of `csv_columns()`. Collection writes the
+extended schema via `csv_columns_ext()`, while training and augmentation still
+validate against the base schema with a subset check
+(`missing = expected - set(df.columns)`). Old CSVs without IMU and new CSVs with
+it both load, and because model inputs are assembled from explicitly named
+columns, **adding the IMU changes neither the model dimensions nor requires
+retraining**.
+
+### Augment Pipeline Constants
+
+Thresholds used only for offline labelling live in `augment/config.py`. Nothing
+here runs on the vehicle — `planner_inference.py` does not import `augment/` at
+all, so tuning these has exactly zero effect on the control loop.
+
+Each value carries a tag: `[실측]` measured against collected data,
+`[추론]` physically reasoned but not calibrated, `[미검증]` weakly supported.
+
+| Constant | Default | Meaning |
+|---|---|---|
+| `ZERO_EVENT_THRESH` | 0.10 | Below this, a frame is a zero-throttle candidate. Safe anywhere in 0.001–0.10 — the data is empty across that whole span |
+| `MOTOR_DEAD_ZONE_MAX` | 0.85 | ESC breakaway. **Unverified** — sits on the distribution mode; determine it with `imu_check.py` |
+| `LIDAR_DANGER_M` | 0.45 | Absolute front threat distance. The former 0.30 never fired once in 2240 rows |
+| `LIDAR_CLEAR_M` | 0.50 | Threat-clear distance. Differs from `DANGER` on purpose — the gap is hysteresis |
+| `LIDAR_RATIO` | 0.60 | Relative threat vs per-file baseline. Always ANDed with `LIDAR_CLEAR_M` |
+| `FRONT_LIDAR_COL` | `lidar_s2` | The only sector allowed to promote an event to STOP |
+| `SIDE_LIDAR_COLS` | `s0`, `s4` | True side. Never STOP evidence — see LiDAR Sector Layout |
+| `OBLIQUE_LIDAR_COLS` | `s1`, `s3` | Front-oblique. Avoidance evidence only |
+| `S_CURVE_SIDE_CLOSE_M` | 0.45 | Both sides closer than this = narrow corridor |
+| `S_CURVE_FRONT_OPEN_M` | 0.45 | Front clear of this = passable. Matches `LIDAR_DANGER_M` so the two tests cannot contradict |
+| `MIN_STOP_FRAMES` | 2 | Frames before an event is promoted to STOP. 0.2 s at `SAVE_FPS=10` |
+| `APPROACH_TREND_WINDOW` | 5 | Look-back for the approach trend. 0.5 s at `SAVE_FPS=10` |
+| `LANE_BASELINE_MIN` | 0.05 | Below this baseline, lane evidence is ignored — BiSeNet reads 0.035 in the S-curve |
+| `CAMERA_EVIDENCE_ENABLED` | `False` | YOLO has no paper-cup class, so this signal is structurally always false |
+| `IMU_MOTION_THRESH` | 0.15 | **Placeholder.** Calibrate with `imu_check.py` before trusting it |
+| `IMU_YAW_THRESH` | 0.30 | Turning threshold in rad/s. Bypasses the gamepad's discrete steering |
+
+Two constants were tuned to the same value on purpose: `LIDAR_DANGER_M` and
+`S_CURVE_FRONT_OPEN_M` are both 0.45 so that a single boundary decides whether
+the path ahead is blocked. Splitting them creates frames that are simultaneously
+"threatened" and "open", which lights up STOP and S_CURVE at once.
+
+Anything at `SAVE_FPS` resolution is worth double-checking when you change the
+collection rate — several of these constants were originally written assuming
+30 fps while the collector actually saves at 10 fps, making them 3× longer than
+their comments claimed.
