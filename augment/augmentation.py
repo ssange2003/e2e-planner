@@ -5,9 +5,14 @@ augmentation.py — 데이터 증강. 시나리오별로 다르게 적용한다.
 핵심: 모든 프레임에 동일한 8배 증강을 적용하면
 "잘못된 행동도 8배로 복제"된다. 시나리오별로 다음을 구분한다.
 
-  NOISE     → 학습 데이터에서 제외 (증강 안 함)
-  AVOIDANCE → mirror 제외 (어느 쪽으로 피했는지가 행동의 핵심)
-  그 외      → 전체 증강 적용
+  NOISE          → 학습 데이터에서 제외 (증강 안 함)
+  AVOIDANCE      → mirror 제외 (어느 쪽으로 피했는지가 행동의 핵심)
+  STOP/RECOVERY  → distance_scale 제외 (거리-정지 인과관계 보존)
+  그 외           → 전체 증강 적용
+
+[프레임 단위 판정] 정책은 파일이 아니라 프레임 라벨로 적용한다.
+파일 단위로 하면 avoidance_course1.csv 처럼 실제 AVOIDANCE 가 16% 뿐인
+파일에서 나머지 84% 의 정상 주행까지 mirror 기회를 잃는다.
 
 모든 증강은 numpy 행 벡터 하나에 대해 동작하며 순수 함수다
 (입력을 변경하지 않고 복사본을 반환) — 단위 테스트가 쉽도록.
@@ -22,6 +27,7 @@ from config import (
     ALL_OBJ_COLS, LANE_GRID_COLS, LIDAR_COLS_IDX,
     TARGET_STEER_COL, EGO_STEER_COL,
     SCENARIO_NOISE, SCENARIOS_EXCLUDED_FROM_TRAINING, SCENARIOS_NO_MIRROR,
+    SCENARIOS_NO_DIST_SCALE,
     _COLS,
 )
 
@@ -133,16 +139,16 @@ def aug_mirror_and_noise(row: np.ndarray, rng) -> np.ndarray:
     return aug_distance_noise(aug_mirror(row, rng), rng)
 
 
-# (이름, 함수, 반복횟수, 좌우반전 포함 여부)
+# (이름, 함수, 반복횟수, 좌우반전 포함, 거리 스케일 변경)
 AUGMENTATIONS = [
-    ("identity",         aug_identity,         1, False),
-    ("mirror",           aug_mirror,           1, True),
-    ("distance_noise",   aug_distance_noise,   1, False),
-    ("lateral_jitter",   aug_lateral_jitter,   1, False),
-    ("confidence_noise", aug_confidence_noise, 1, False),
-    ("object_dropout",   aug_object_dropout,   1, False),
-    ("distance_scale",   aug_distance_scale,   1, False),
-    ("mirror_noise",     aug_mirror_and_noise, 1, True),
+    ("identity",         aug_identity,         1, False, False),
+    ("mirror",           aug_mirror,           1, True,  False),
+    ("distance_noise",   aug_distance_noise,   1, False, False),
+    ("lateral_jitter",   aug_lateral_jitter,   1, False, False),
+    ("confidence_noise", aug_confidence_noise, 1, False, False),
+    ("object_dropout",   aug_object_dropout,   1, False, False),
+    ("distance_scale",   aug_distance_scale,   1, False, True),
+    ("mirror_noise",     aug_mirror_and_noise, 1, True,  False),
 ]
 
 
@@ -162,6 +168,8 @@ class Augmentor:
 
         # ── 1. 학습에서 제외할 시나리오 필터링 ───────────────────────
         # 파일명이 noise이거나, 센서 판정으로 노이즈 zero-event인 프레임.
+        # 제외는 파일 단위로 유지한다 — 사람이 "이 주행은 실수였다" 라고
+        # 직접 라벨링한 것이므로 프레임 판정보다 우선한다.
         file_scenario = df["_scenario_type"]
         excluded = file_scenario.isin(SCENARIOS_EXCLUDED_FROM_TRAINING)
         n_excluded_files = int(excluded.sum())
@@ -169,12 +177,17 @@ class Augmentor:
         keep = ~excluded
         df_keep = df.loc[keep].reset_index(drop=True)
         labels_keep = scenario_labels.loc[keep].reset_index(drop=True)
-        no_mirror = df_keep["_scenario_type"].isin(SCENARIOS_NO_MIRROR).to_numpy()
+
+        # 증강 정책은 프레임 라벨로 판정한다. 파일 단위로 하면
+        # avoidance 파일의 정상 주행 구간까지 mirror 를 잃는다.
+        no_mirror = labels_keep.isin(SCENARIOS_NO_MIRROR).to_numpy()
+        no_scale = labels_keep.isin(SCENARIOS_NO_DIST_SCALE).to_numpy()
 
         if df_keep.empty:
             self.last_stats = {
                 "excluded_noise_rows": n_excluded_files,
-                "input_rows": 0, "output_rows": 0, "mirror_skipped": 0,
+                "input_rows": 0, "output_rows": 0,
+                "mirror_skipped": 0, "scale_skipped": 0,
             }
             return pd.DataFrame(columns=_COLS)
 
@@ -184,11 +197,16 @@ class Augmentor:
         aug_rows = []
         n_mirror_skipped = 0
 
+        n_scale_skipped = 0
         for row_i, orig_row in enumerate(data_np):
             skip_mirror = bool(no_mirror[row_i])
-            for name, fn, weight, is_mirror in AUGMENTATIONS:
+            skip_scale = bool(no_scale[row_i])
+            for name, fn, weight, is_mirror, changes_scale in AUGMENTATIONS:
                 if is_mirror and skip_mirror:
                     n_mirror_skipped += 1
+                    continue
+                if changes_scale and skip_scale:
+                    n_scale_skipped += 1
                     continue
                 for _ in range(weight):
                     aug_rows.append(fn(orig_row, rng))
@@ -219,6 +237,7 @@ class Augmentor:
             "input_rows": len(df_keep),
             "output_rows": len(aug_df),
             "mirror_skipped": n_mirror_skipped,
+            "scale_skipped": n_scale_skipped,
         }
 
         return aug_df

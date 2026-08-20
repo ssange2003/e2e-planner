@@ -5,9 +5,14 @@ test_pipeline.py — synthetic 데이터로 핵심 케이스 검증
 
 CASE A: 측면만 가까움(0.25m) + 정면 열림(1.0m) + throttle 정상 → STOP 아님
 CASE B: 정면 0.25m + throttle 0                                → STOP 후보
-CASE C: STOP 후 0→0.4→0.7→0.9→0.95                              → recovery 보존
+CASE C: STOP 후 0→0.4→0.7→0.9→0.95                              → recovery 구간 보존
 CASE D: throttle 유지 + 장애물 접근                              → avoidance 보호
 CASE E: noise 파일                                              → 학습 데이터 제외
+CASE F: 전방 사선(s1/s3)만 근접                                  → avoidance, STOP 아님
+CASE G: STOP/RECOVERY 프레임                                    → distance_scale 제외
+
+[섹터 규약] 측면 = s0/s4 (29.9~59.8°), 전방 사선 = s1/s3 (9.7~29.9°),
+정면 = s2 (±9.9°). s1/s3 는 측면이 아니므로 STOP 증거로 쓰지 않는다.
 """
 
 import sys
@@ -22,16 +27,22 @@ from augmentation import Augmentor
 
 
 def make_frames(n, front, side_l, side_r, throttle, steering,
-                scenario_type="normal", lane_val=0.02):
-    """테스트용 DataFrame 생성."""
+                scenario_type="normal", lane_val=0.02,
+                oblique_l=5.0, oblique_r=5.0):
+    """테스트용 DataFrame 생성.
+
+    side_l/side_r    → lidar_s0/s4 (진짜 측면)
+    oblique_l/_r     → lidar_s1/s3 (전방 사선)
+    front            → lidar_s2
+    """
     cols = csv_columns()
     df = pd.DataFrame(0.0, index=range(n), columns=cols)
     df["frame_id"] = np.arange(1, n + 1)
-    df["lidar_s0"] = 5.0
-    df["lidar_s4"] = 5.0
     df["lidar_s2"] = front
-    df["lidar_s1"] = side_l
-    df["lidar_s3"] = side_r
+    df["lidar_s0"] = side_l
+    df["lidar_s4"] = side_r
+    df["lidar_s1"] = oblique_l
+    df["lidar_s3"] = oblique_r
     df["target_throttle"] = throttle
     df["target_steering"] = steering
     df["scenario"] = 0
@@ -100,6 +111,12 @@ df = make_frames(40, front=front, side_l=3.0, side_r=3.0,
 d = classify(df)
 n_rec = int(d["is_recovery"].sum())
 check("recovery 검출됨", n_rec >= 1, f"recovery={n_rec} frames")
+check("recovery 가 구간(2프레임 이상)으로 잡힘", n_rec >= 2,
+      f"recovery={n_rec} frames (점이 아니라 구간이어야 함)")
+rec_idx = np.flatnonzero(d["is_recovery"].to_numpy())
+check("0.4/0.7 프레임도 recovery 에 포함",
+      len(rec_idx) > 0 and rec_idx.min() <= 16,
+      f"recovery 시작={rec_idx.min() if len(rec_idx) else -1} (15=throttle 0.4)")
 
 proc = LabelProcessor(5).process(df, d)
 transition = proc["target_throttle"].iloc[15:19].to_numpy()
@@ -134,14 +151,44 @@ df_norm = make_frames(30, front=3.0, side_l=3.0, side_r=3.0,
 df_norm["_src_idx"] = 1
 both = pd.concat([df_noise, df_norm], ignore_index=True)
 d = classify(both)
-aug = Augmentor(42).augment(both, d["scenario_label"])
-stats = Augmentor(42).augment(both, d["scenario_label"]) is not None
 a = Augmentor(42)
 aug = a.augment(both, d["scenario_label"])
 check("noise 행 제외됨", a.last_stats["excluded_noise_rows"] == 30,
       f"excluded={a.last_stats['excluded_noise_rows']} rows")
 check("normal만 증강됨", a.last_stats["input_rows"] == 30,
       f"input={a.last_stats['input_rows']} rows → {a.last_stats['output_rows']}")
+
+# ── CASE F: 전방 사선만 근접 → avoidance, STOP 아님 ─────────────────
+print()
+print("CASE F: 사선(s1) 0.25m / 정면·측면 열림 / throttle 유지")
+obl = np.concatenate([np.full(10, 3.0), np.full(10, 0.25), np.full(20, 3.0)])
+df = make_frames(40, front=2.0, side_l=3.0, side_r=3.0,
+                 throttle=0.90, steering=0.0,
+                 scenario_type="normal", oblique_l=obl)
+d = classify(df)
+check("사선 장애물이 avoidance 로 검출됨", int(d["is_avoidance"].sum()) > 0,
+      f"avoidance={int(d['is_avoidance'].sum())} frames")
+check("사선은 STOP 증거가 아님", int(d["is_stop"].sum()) == 0,
+      f"stop={int(d['is_stop'].sum())}")
+
+# ── CASE G: STOP/RECOVERY 는 distance_scale 제외 ────────────────────
+print()
+print("CASE G: STOP/RECOVERY 프레임은 distance_scale 증강에서 제외")
+front = np.concatenate([np.full(5, 1.5), np.full(10, 0.25), np.full(25, 2.0)])
+thr = np.concatenate([
+    np.full(5, 0.90), np.full(10, 0.0),
+    [0.4, 0.7, 0.9, 0.95], np.full(21, 0.95),
+])
+df = make_frames(40, front=front, side_l=3.0, side_r=3.0,
+                 throttle=thr, steering=0.0, scenario_type="recovery")
+d = classify(df)
+a = Augmentor(42)
+aug = a.augment(df, d["scenario_label"])
+n_protected = int((d["scenario_label"].isin(["stop", "recovery"])).sum())
+check("stop/recovery 프레임 존재", n_protected > 0, f"{n_protected} frames")
+check("distance_scale 이 해당 프레임만큼 생략됨",
+      a.last_stats["scale_skipped"] == n_protected,
+      f"skipped={a.last_stats['scale_skipped']} / expected={n_protected}")
 
 # ── 파일 경계 누수 검증 ─────────────────────────────────────────────
 print("\nEXTRA: 파일 경계 누수 검증")

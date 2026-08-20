@@ -106,6 +106,9 @@ def run_pipeline(input_files: list, output_csv: Path,
     if stats["mirror_skipped"]:
         print(f"  mirror 증강 생략: {stats['mirror_skipped']} rows "
               f"(avoidance 방향성 보존)")
+    if stats.get("scale_skipped"):
+        print(f"  distance_scale 생략: {stats['scale_skipped']} rows "
+              f"(stop/recovery 거리-정지 인과관계 보존)")
 
     if aug_df.empty:
         print("[ERROR] 증강 결과가 비어 있습니다.")
