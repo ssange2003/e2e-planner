@@ -5,8 +5,13 @@ from pathlib import Path
 from config import *
 from sensor_evidence import compute_sensor_evidence
 
+# ── 시나리오 라벨 정의 ──
+SCENARIO_NORMAL   = 0
+SCENARIO_STOP     = 1
+SCENARIO_AVOID    = 2
+SCENARIO_RECOVERY = 3
+
 def load_and_parse_files(input_files: list) -> pd.DataFrame:
-    """파일 로드 및 파일명 기반 Prior(메타데이터) 추출"""
     df_list = []
     for i, file_path_str in enumerate(input_files):
         path = Path(file_path_str)
@@ -14,8 +19,6 @@ def load_and_parse_files(input_files: list) -> pd.DataFrame:
         
         temp_df = pd.read_csv(path, on_bad_lines='warn').dropna().reset_index(drop=True)
         temp_df["_src_idx"] = i
-        
-        # 파일명 Prior: 파일 이름에 'stop'이 들어가면 강한 정지 의도로 간주
         temp_df["_prior_stop"] = "stop" in path.name.lower()
         df_list.append(temp_df)
         
@@ -53,7 +56,7 @@ def apply_hierarchical_intent_filter(df: pd.DataFrame, smooth_window: int = 5) -
         idx = sub.index
         base_f = front_baseline.get(gid, LIDAR_CLEAR_M)
         base_l = lane_baseline.get(gid, np.nan)
-        prior_stop = sub["_prior_stop"].iloc[0] # 파일명 Prior
+        prior_stop = sub["_prior_stop"].iloc[0]
         
         for eid in event_key.loc[idx].dropna().unique():
             ev_idx = idx[event_key.loc[idx] == eid]
@@ -72,8 +75,17 @@ def apply_hierarchical_intent_filter(df: pd.DataFrame, smooth_window: int = 5) -
             if not np.isnan(base_l) and base_l > 0:
                 lane_hit = ev['lane_sum'].loc[ev_idx].mean() < LANE_VIS_DROP_RATIO * base_l
 
-            # [핵심] 파일명 prior가 'stop'이면 증거 기준을 대폭 완화하여 원본 보존
-            evidence = prior_stop or (dmin < LIDAR_DANGER_M) or (dmin < LIDAR_RATIO * base_f and dmin < LIDAR_CLEAR_M) or (is_approaching and dmin < LIDAR_CLEAR_M) or cam_hit or lane_hit
+            # [수정 1] prior_stop 약화: 센서 증거를 먼저 계산하고, prior는 지속시간이 충족될 때만 개입
+            evidence_sensor = (
+                (dmin < LIDAR_DANGER_M) 
+                or (dmin < LIDAR_RATIO * base_f and dmin < LIDAR_CLEAR_M) 
+                or (is_approaching and dmin < LIDAR_CLEAR_M) 
+                or cam_hit 
+                or lane_hit
+            )
+            evidence = evidence_sensor
+            if prior_stop and (len(ev_idx) >= MIN_STOP_FRAMES):
+                evidence = True
 
             if is_boundary: is_event_boundary.loc[ev_idx] = True
             elif evidence:
@@ -103,10 +115,31 @@ def apply_hierarchical_intent_filter(df: pd.DataFrame, smooth_window: int = 5) -
                 is_recovery_launch.loc[idx[i]] = True
                 awaiting = False
 
-    side_threat = ev['side_dist'] < LIDAR_DANGER_M
+    # [수정 2] side_threat 독립: 종이컵 S구간 3채널 라이다 동시 활용 (측면 단독 초근접 허용)
+    side_threat = (ev['side_dist'] < 0.20)
     is_avoidance = (front_threat | side_threat | ev['cam_threat']) & (throttle_raw >= ZERO_EVENT_THRESH)
 
-    # 5. 스무딩 및 마스킹
+    # 5. 시나리오 컬럼 명시적 생성
+    df['scenario'] = SCENARIO_NORMAL
+    df.loc[is_avoidance, 'scenario'] = SCENARIO_AVOID
+    df.loc[is_recovery_launch, 'scenario'] = SCENARIO_RECOVERY
+    df.loc[stop_state, 'scenario'] = SCENARIO_STOP  # STOP이 가장 높은 우선순위로 덮어씀
+
+    # 6. NORMAL 시나리오 데드존(0.85) 보정
+    # [유지 결정] 하드웨어 구동을 위해 NORMAL 상황에서의 저속 스로틀(망설임/코너링)을 0.85 이상으로 승격
+    is_straight = df["target_steering"].abs() < 0.15
+    mask_normal = df['scenario'] == SCENARIO_NORMAL
+    
+    # 6-A. 직선 망설임 -> 0.94 풀악셀 부스팅
+    mask_straight_err = mask_normal & is_straight & (throttle_raw >= ZERO_EVENT_THRESH) & (throttle_raw < 0.94)
+    throttle_raw = throttle_raw.mask(mask_straight_err, 0.94)
+    
+    # 6-B. 코너링 감속 -> 모터 기동 영역(0.85~0.92)으로 선형 맵핑
+    mask_corner_intent = mask_normal & (~is_straight) & (throttle_raw >= ZERO_EVENT_THRESH) & (throttle_raw < MOTOR_DEAD_ZONE_MAX)
+    corner_orig = throttle_raw[mask_corner_intent]
+    throttle_raw.loc[mask_corner_intent] = 0.85 + (corner_orig - ZERO_EVENT_THRESH) * ((0.92 - 0.85) / (MOTOR_DEAD_ZONE_MAX - ZERO_EVENT_THRESH))
+
+    # 7. 스무딩 및 엣지 보호 마스킹
     is_edge_intent = (is_event_evidence | is_event_boundary | is_recovery_launch | is_avoidance)
     pad = max(1, smooth_window // 2)
     is_edge_protected = is_edge_intent.astype(float).groupby(grp, group_keys=False).apply(
