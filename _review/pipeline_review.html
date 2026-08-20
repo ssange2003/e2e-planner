@@ -1,0 +1,1123 @@
+<title>종이컵 S구간 파이프라인 진단</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Source+Serif+4:opsz,wght@8..60,400;8..60,600&display=swap">
+
+<style>
+:root{
+  --ground:#FBFBFC;
+  --surface:#FFFFFF;
+  --surface-2:#F2F4F7;
+  --ink:#111820;
+  --ink-2:#3D4854;
+  --ink-3:#6B7684;
+  --rule:#DCE1E8;
+  --rule-2:#C3CBD6;
+  --accent:#1B6595;
+  --accent-soft:#E3EEF6;
+  --near:#B03A12;
+  --near-soft:#FAE9E1;
+  --mid:#94620A;
+  --mid-soft:#FBF1DC;
+  --far:#0E6E77;
+  --far-soft:#E0F0F1;
+  --ok:#1F6B3B;
+  --shadow:0 1px 2px rgba(17,24,32,.05),0 8px 24px -12px rgba(17,24,32,.16);
+}
+@media (prefers-color-scheme:dark){
+  :root:not([data-theme="light"]){
+    --ground:#0C1014;
+    --surface:#141A21;
+    --surface-2:#1B222B;
+    --ink:#E8ECF1;
+    --ink-2:#B4BFCB;
+    --ink-3:#8391A0;
+    --rule:#26303A;
+    --rule-2:#374350;
+    --accent:#67AEDB;
+    --accent-soft:#16303F;
+    --near:#E88A5F;
+    --near-soft:#331B10;
+    --mid:#D6A63C;
+    --mid-soft:#2E2410;
+    --far:#5CB8BF;
+    --far-soft:#0F2C2E;
+    --ok:#6FBF8B;
+    --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px -12px rgba(0,0,0,.7);
+  }
+}
+:root[data-theme="dark"]{
+  --ground:#0C1014;
+  --surface:#141A21;
+  --surface-2:#1B222B;
+  --ink:#E8ECF1;
+  --ink-2:#B4BFCB;
+  --ink-3:#8391A0;
+  --rule:#26303A;
+  --rule-2:#374350;
+  --accent:#67AEDB;
+  --accent-soft:#16303F;
+  --near:#E88A5F;
+  --near-soft:#331B10;
+  --mid:#D6A63C;
+  --mid-soft:#2E2410;
+  --far:#5CB8BF;
+  --far-soft:#0F2C2E;
+  --ok:#6FBF8B;
+  --shadow:0 1px 2px rgba(0,0,0,.4),0 8px 24px -12px rgba(0,0,0,.7);
+}
+
+*{box-sizing:border-box}
+body{
+  margin:0;
+  background:var(--ground);
+  color:var(--ink);
+  font-family:"Source Serif 4",Georgia,"Noto Serif KR",serif;
+  font-size:17px;
+  line-height:1.65;
+  -webkit-font-smoothing:antialiased;
+}
+.wrap{max-width:1080px;margin:0 auto;padding:0 28px 96px}
+.col{max-width:680px}
+
+h1,h2,h3,h4,.mono,.tag,thead th{font-family:Archivo,"Helvetica Neue",Arial,sans-serif}
+.mono,code,pre,.tag,.stat-v,td.num{font-family:"IBM Plex Mono",ui-monospace,Menlo,monospace}
+
+/* ── masthead ─────────────────────────────── */
+header.mast{border-bottom:1px solid var(--rule);margin-bottom:56px}
+.mast-in{max-width:1080px;margin:0 auto;padding:56px 28px 40px}
+.eyebrow{
+  font-family:"IBM Plex Mono",monospace;font-size:11.5px;font-weight:500;
+  letter-spacing:.16em;text-transform:uppercase;color:var(--ink-3);
+  display:flex;gap:10px;align-items:center;flex-wrap:wrap
+}
+.eyebrow .dot{width:4px;height:4px;border-radius:50%;background:var(--rule-2)}
+h1{
+  font-size:clamp(32px,5.2vw,50px);font-weight:700;letter-spacing:-.025em;
+  line-height:1.06;margin:18px 0 0;text-wrap:balance;max-width:16ch
+}
+.dek{font-size:19px;color:var(--ink-2);margin:18px 0 0;max-width:60ch;line-height:1.55}
+
+.stats{
+  display:grid;grid-template-columns:repeat(auto-fit,minmax(150px,1fr));
+  gap:1px;background:var(--rule);border:1px solid var(--rule);
+  margin-top:36px;border-radius:3px;overflow:hidden
+}
+.stat{background:var(--surface);padding:16px 18px}
+.stat-k{
+  font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.11em;
+  text-transform:uppercase;color:var(--ink-3);display:block;margin-bottom:7px
+}
+.stat-v{font-size:23px;font-weight:600;letter-spacing:-.02em;font-variant-numeric:tabular-nums;color:var(--ink);display:block;line-height:1.15}
+.stat-v.bad{color:var(--near)}
+.stat-n{font-size:12.5px;color:var(--ink-3);margin-top:5px;display:block;font-family:"Source Serif 4",serif}
+
+/* ── sections ─────────────────────────────── */
+section{margin-top:64px;scroll-margin-top:20px}
+.sec-head{display:flex;align-items:baseline;gap:14px;border-bottom:1px solid var(--rule);padding-bottom:11px;margin-bottom:26px}
+.sec-num{font-family:"IBM Plex Mono",monospace;font-size:12px;font-weight:600;color:var(--accent);letter-spacing:.04em}
+h2{font-size:26px;font-weight:600;letter-spacing:-.02em;margin:0;line-height:1.2}
+h3{font-size:19px;font-weight:600;letter-spacing:-.012em;margin:34px 0 12px;line-height:1.3}
+h4{font-size:15.5px;font-weight:600;margin:22px 0 8px;color:var(--ink)}
+p{margin:0 0 15px;max-width:68ch}
+ul,ol{margin:0 0 15px;padding-left:22px;max-width:66ch}
+li{margin-bottom:7px}
+strong{font-weight:600}
+a{color:var(--accent)}
+
+/* ── finding blocks ───────────────────────── */
+.finding{
+  background:var(--surface);border:1px solid var(--rule);border-top:2px solid var(--rule-2);
+  border-radius:3px;padding:20px 22px;margin:20px 0;box-shadow:var(--shadow)
+}
+.finding.sev-1{border-top-color:var(--near)}
+.finding.sev-2{border-top-color:var(--mid)}
+.finding.sev-3{border-top-color:var(--far)}
+.f-head{display:flex;gap:11px;align-items:center;flex-wrap:wrap;margin-bottom:10px}
+.tag{
+  font-size:10.5px;font-weight:600;letter-spacing:.09em;text-transform:uppercase;
+  padding:3px 8px;border-radius:2px;white-space:nowrap
+}
+.tag.id{background:var(--surface-2);color:var(--ink-2)}
+.tag.s1{background:var(--near-soft);color:var(--near)}
+.tag.s2{background:var(--mid-soft);color:var(--mid)}
+.tag.s3{background:var(--far-soft);color:var(--far)}
+.tag.verified{background:var(--accent-soft);color:var(--accent)}
+.f-title{font-family:Archivo,sans-serif;font-size:17.5px;font-weight:600;letter-spacing:-.012em;line-height:1.3;margin:0 0 10px}
+.finding p:last-child{margin-bottom:0}
+
+/* ── tables ───────────────────────────────── */
+.scroll{overflow-x:auto;margin:20px 0;border:1px solid var(--rule);border-radius:3px;background:var(--surface)}
+table{border-collapse:collapse;width:100%;font-size:14px;font-family:"Source Serif 4",serif}
+thead th{
+  font-family:Archivo,sans-serif;font-size:11px;font-weight:600;letter-spacing:.07em;text-transform:uppercase;
+  color:var(--ink-3);text-align:left;padding:11px 14px;border-bottom:1px solid var(--rule-2);white-space:nowrap;background:var(--surface-2)
+}
+td{padding:10px 14px;border-bottom:1px solid var(--rule);vertical-align:top}
+tbody tr:last-child td{border-bottom:none}
+td.num{text-align:right;font-variant-numeric:tabular-nums;font-size:13px;white-space:nowrap}
+.hit{color:var(--near);font-weight:600}
+.miss{color:var(--ink-3)}
+.good{color:var(--ok);font-weight:600}
+caption{caption-side:bottom;text-align:left;padding:10px 14px;font-size:13px;color:var(--ink-3);border-top:1px solid var(--rule)}
+
+/* ── code ─────────────────────────────────── */
+pre{
+  background:var(--surface-2);border:1px solid var(--rule);border-radius:3px;
+  padding:15px 17px;overflow-x:auto;font-size:12.8px;line-height:1.62;margin:16px 0
+}
+code{font-size:.88em;background:var(--surface-2);padding:1.5px 5px;border-radius:2px;border:1px solid var(--rule)}
+pre code{background:none;padding:0;border:none;font-size:1em}
+.del{color:var(--near)}
+.add{color:var(--ok)}
+.cmt{color:var(--ink-3)}
+
+/* ── callout ──────────────────────────────── */
+.note{
+  border-left:3px solid var(--accent);background:var(--accent-soft);
+  padding:14px 18px;margin:20px 0;border-radius:0 3px 3px 0
+}
+.note.warn{border-left-color:var(--near);background:var(--near-soft)}
+.note p{margin:0;max-width:64ch}
+.note p+p{margin-top:9px}
+.note-k{
+  font-family:Archivo,sans-serif;font-size:11px;font-weight:700;letter-spacing:.1em;
+  text-transform:uppercase;display:block;margin-bottom:6px;color:var(--accent)
+}
+.note.warn .note-k{color:var(--near)}
+
+/* ── figure ───────────────────────────────── */
+figure{margin:26px 0;background:var(--surface);border:1px solid var(--rule);border-radius:3px;padding:22px;box-shadow:var(--shadow)}
+figure svg{display:block;width:100%;height:auto;max-width:620px;margin:0 auto}
+figcaption{font-size:13.5px;color:var(--ink-3);margin-top:14px;line-height:1.5;max-width:64ch}
+.svg-lbl{font-family:"IBM Plex Mono",monospace;font-size:10px;font-weight:500}
+.svg-lbl-s{font-family:"IBM Plex Mono",monospace;font-size:8.5px}
+
+/* ── state machine ────────────────────────── */
+.fsm{display:flex;flex-direction:column;gap:0;margin:20px 0;max-width:640px}
+.fsm-row{display:flex;align-items:stretch;gap:0}
+.fsm-node{
+  border:1px solid var(--rule-2);background:var(--surface);border-radius:3px;padding:11px 15px;
+  font-family:"IBM Plex Mono",monospace;font-size:12.5px;font-weight:600;letter-spacing:.02em;min-width:132px
+}
+.fsm-node.n-normal{border-color:var(--far);color:var(--far);background:var(--far-soft)}
+.fsm-node.n-appr{border-color:var(--mid);color:var(--mid);background:var(--mid-soft)}
+.fsm-node.n-stop{border-color:var(--near);color:var(--near);background:var(--near-soft)}
+.fsm-node.n-rec{border-color:var(--accent);color:var(--accent);background:var(--accent-soft)}
+.fsm-node.dashed{border-style:dashed}
+.fsm-arrow{
+  display:flex;align-items:center;padding:0 12px;color:var(--ink-3);
+  font-family:"IBM Plex Mono",monospace;font-size:11px;white-space:nowrap
+}
+.fsm-gap{height:9px;border-left:1px solid var(--rule-2);margin-left:66px}
+
+/* ── priority list ────────────────────────── */
+.prio{list-style:none;padding:0;margin:20px 0;max-width:100%}
+.prio li{
+  display:grid;grid-template-columns:auto 1fr auto;gap:16px;align-items:start;
+  padding:13px 0;border-bottom:1px solid var(--rule);margin:0
+}
+.prio li:last-child{border-bottom:none}
+.prio-n{
+  font-family:"IBM Plex Mono",monospace;font-size:12px;font-weight:600;color:var(--accent);
+  padding-top:2px;min-width:22px
+}
+.prio-b strong{display:block;font-family:Archivo,sans-serif;font-size:15px;margin-bottom:3px}
+.prio-b span{font-size:14px;color:var(--ink-2)}
+.prio-c{
+  font-family:"IBM Plex Mono",monospace;font-size:10.5px;letter-spacing:.06em;text-transform:uppercase;
+  padding:3px 8px;border-radius:2px;white-space:nowrap;margin-top:2px
+}
+.c-free{background:var(--far-soft);color:var(--far)}
+.c-recol{background:var(--near-soft);color:var(--near)}
+
+hr.div{border:none;border-top:1px solid var(--rule);margin:56px 0 0}
+footer{margin-top:56px;padding-top:22px;border-top:1px solid var(--rule);font-size:13.5px;color:var(--ink-3)}
+footer p{max-width:64ch}
+@media(max-width:640px){
+  body{font-size:16px}
+  .mast-in{padding:40px 20px 32px}
+  .wrap{padding:0 20px 72px}
+  .fsm-row{flex-direction:column}
+  .fsm-arrow{padding:6px 0 6px 20px}
+  .prio li{grid-template-columns:auto 1fr}
+  .prio-c{grid-column:2}
+}
+</style>
+
+<header class="mast">
+  <div class="mast-in">
+    <div class="eyebrow">
+      <span>E2E Planner</span><span class="dot"></span>
+      <span>augment 파이프라인 감사</span><span class="dot"></span>
+      <span>2026-08-20</span>
+    </div>
+    <h1>종이컵 S구간 파이프라인 진단</h1>
+    <p class="dek">
+      실측 4개 코스(2,240 프레임)로 <code>augment/</code> 전처리 전 과정을 역검증했다.
+      S구간 검출기가 실데이터에서 한 번도 발동하지 않고, 카메라 증거는 구조적으로 항상 거짓이며,
+      모든 시간 상수가 3배 잘못 해석되어 있다.
+    </p>
+    <div class="stats">
+      <div class="stat">
+        <span class="stat-k">S구간 기하 검출</span>
+        <span class="stat-v bad">0.0%</span>
+        <span class="stat-n">s_curve 파일에서조차 미발동</span>
+      </div>
+      <div class="stat">
+        <span class="stat-k">미사용 라이다 섹터</span>
+        <span class="stat-v bad">s0 · s4</span>
+        <span class="stat-n">S구간 벽을 보는 유일한 센서</span>
+      </div>
+      <div class="stat">
+        <span class="stat-k">카메라 증거 발생률</span>
+        <span class="stat-v bad">0.03%</span>
+        <span class="stat-n">5 / 11,200 슬롯</span>
+      </div>
+      <div class="stat">
+        <span class="stat-k">시간 상수 오차</span>
+        <span class="stat-v bad">3×</span>
+        <span class="stat-n">30fps 가정 · 실제 10fps</span>
+      </div>
+    </div>
+  </div>
+</header>
+
+<div class="wrap">
+
+<!-- ══════════════════════════════════════════ -->
+<section id="summary">
+  <div class="sec-head"><span class="sec-num">01</span><h2>결론 먼저</h2></div>
+  <div class="col">
+    <p>
+      모듈 구조(<code>DatasetLoader → SensorEvidence → ScenarioClassifier → LabelProcessor → Augmentor</code>)는
+      요구사항과 이미 정확히 일치한다. <strong>구조를 다시 쓸 필요는 없다.</strong>
+      문제는 전부 그 안에 채워진 <em>값과 판정식</em>에 있고, 대부분 한 줄에서 몇 줄 수준의 수정으로 고쳐진다.
+    </p>
+    <p>
+      다만 그중 셋은 "튜닝"이 아니라 <strong>기능이 죽어 있는 상태</strong>다. 지금 파이프라인이 그럴듯한 결과를 내는
+      이유는 파일명 prior가 죽은 센서 로직을 대신 떠받치고 있기 때문이다. 파일명을 떼면 S구간 검출은 0%다.
+    </p>
+  </div>
+
+  <div class="scroll">
+    <table>
+      <caption>심각도순. "검증" = 실측 데이터로 재현 확인함.</caption>
+      <thead>
+        <tr><th>ID</th><th>발견</th><th>영향</th><th>상태</th></tr>
+      </thead>
+      <tbody>
+        <tr><td class="mono">F‑01</td><td><strong>S구간 검출기가 실데이터에서 절대 발동하지 않음</strong> — 측면 섹터를 s1/s3로 잘못 지정</td><td class="hit">기능 사망</td><td class="mono">검증</td></tr>
+        <tr><td class="mono">F‑02</td><td><strong>s0/s4 섹터가 파이프라인 전체에서 미사용</strong></td><td class="hit">기능 사망</td><td class="mono">검증</td></tr>
+        <tr><td class="mono">F‑03</td><td><strong>카메라 증거가 구조적으로 항상 False</strong> — YOLO 클래스에 종이컵 없음</td><td class="hit">기능 사망</td><td class="mono">검증</td></tr>
+        <tr><td class="mono">F‑04</td><td><strong>모든 시간 상수가 3배 오해석</strong> — 주석 30fps, 실제 SAVE_FPS=10</td><td class="hit">판정 왜곡</td><td class="mono">검증</td></tr>
+        <tr><td class="mono">F‑05</td><td><strong>RECOVERY가 1프레임만 라벨됨</strong> — 요구사항 §6과 정면 충돌</td><td class="hit">요구 미충족</td><td class="mono">검증</td></tr>
+        <tr><td class="mono">F‑06</td><td><strong>depth hole이 "가장 먼 거리"로 기록됨</strong> — 부호 반전</td><td class="hit">라벨 오염</td><td class="mono">코드</td></tr>
+        <tr><td class="mono">F‑07</td><td>S구간에서 lane 증거 baseline이 0.003 — 임계값 무의미</td><td class="mid">오탐 위험</td><td class="mono">검증</td></tr>
+        <tr><td class="mono">F‑08</td><td>approach trend가 윈도우 시작 <em>단일 프레임</em>만 사용</td><td class="mid">불안정</td><td class="mono">코드</td></tr>
+        <tr><td class="mono">F‑09</td><td>모델 입력에 시간 맥락이 없음 — STOP과 RECOVERY가 구분 불가</td><td class="hit">목표 미달</td><td class="mono">설계</td></tr>
+        <tr><td class="mono">F‑10</td><td><code>scenario</code> 컬럼이 항상 0 — 분류 결과가 학습에 전달 안 됨</td><td class="mid">기회 손실</td><td class="mono">검증</td></tr>
+        <tr><td class="mono">F‑11</td><td>루트 <code>augment.py</code>와 <code>augment/</code> 이중 존재 — 상수 중복 정의</td><td class="miss">유지보수</td><td class="mono">코드</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════ -->
+<section id="geometry">
+  <div class="sec-head"><span class="sec-num">02</span><h2>가장 중요한 발견: 섹터를 잘못 골랐다</h2></div>
+
+  <div class="col">
+    <p>
+      <code>config.py</code>는 측면 라이다를 이렇게 정의한다.
+    </p>
+  </div>
+
+<pre><code>FRONT_LIDAR_COL = "lidar_s2"
+SIDE_LIDAR_COLS = ["lidar_s1", "lidar_s3"]   <span class="del">← 이게 측면이 아니다</span></code></pre>
+
+  <div class="col">
+    <p>
+      그런데 <code>collect_data_planner.py</code>의 섹터 정의를 각도로 환산하면 이야기가 달라진다.
+      라이다는 1000점 / 360°이므로 <strong>인덱스 1개 = 0.36°</strong>다.
+    </p>
+  </div>
+
+  <div class="scroll">
+    <table>
+      <caption>인덱스 0 = 정면. 5개 섹터를 다 합쳐도 전방 ±60°만 덮는다.</caption>
+      <thead><tr><th>섹터</th><th>인덱스</th><th>실제 각도</th><th>코드상 이름</th><th>실제 성격</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">s2</td><td class="num">972–27</td><td class="num">±9.9°</td><td>정면</td><td class="good">정면 — 맞음</td></tr>
+        <tr><td class="mono">s1 / s3</td><td class="num">27–83</td><td class="num">9.7°–29.9°</td><td>좌·우 전방</td><td class="hit">전방 사선 — 측면 아님</td></tr>
+        <tr><td class="mono">s0 / s4</td><td class="num">83–166</td><td class="num">29.9°–59.8°</td><td>좌·우측</td><td class="good">진짜 측면 — <strong>미사용</strong></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+<figure>
+<svg viewBox="0 0 340 205" role="img" aria-label="라이다 5섹터 각도 배치와 40cm 차선 벽에 대한 최소 관측 거리">
+  <defs>
+    <pattern id="hatch" width="5" height="5" patternTransform="rotate(45)" patternUnits="userSpaceOnUse">
+      <line x1="0" y1="0" x2="0" y2="5" stroke="var(--rule-2)" stroke-width="1.4"/>
+    </pattern>
+  </defs>
+
+  <!-- range rings -->
+  <circle cx="170" cy="150" r="118" fill="none" stroke="var(--rule)" stroke-width="1"/>
+  <circle cx="170" cy="150" r="59" fill="none" stroke="var(--rule)" stroke-width="1" stroke-dasharray="2 3"/>
+  <text x="174" y="94" class="svg-lbl-s" fill="var(--ink-3)">0.5m</text>
+  <text x="174" y="36" class="svg-lbl-s" fill="var(--ink-3)">1.0m</text>
+
+  <!-- s0 left wide : HIGHLIGHT -->
+  <path d="M170,150 L111.2,47.7 A118,118 0 0 0 68.0,90.6 Z" fill="var(--far-soft)" stroke="var(--far)" stroke-width="1.6"/>
+  <!-- s4 right wide : HIGHLIGHT -->
+  <path d="M170,150 L228.8,47.7 A118,118 0 0 1 272.0,90.6 Z" fill="var(--far-soft)" stroke="var(--far)" stroke-width="1.6"/>
+  <!-- s1 left oblique : dim -->
+  <path d="M170,150 L150.1,33.7 A118,118 0 0 0 111.2,47.7 Z" fill="url(#hatch)" stroke="var(--rule-2)" stroke-width="1"/>
+  <!-- s3 right oblique : dim -->
+  <path d="M170,150 L189.9,33.7 A118,118 0 0 1 228.8,47.7 Z" fill="url(#hatch)" stroke="var(--rule-2)" stroke-width="1"/>
+  <!-- s2 front -->
+  <path d="M170,150 L149.7,33.8 A118,118 0 0 1 190.3,33.8 Z" fill="var(--accent-soft)" stroke="var(--accent)" stroke-width="1.4"/>
+
+  <!-- cup walls at ±0.2m -->
+  <line x1="146.5" y1="150" x2="146.5" y2="26" stroke="var(--near)" stroke-width="1.6" stroke-dasharray="4 3"/>
+  <line x1="193.5" y1="150" x2="193.5" y2="26" stroke="var(--near)" stroke-width="1.6" stroke-dasharray="4 3"/>
+
+  <!-- closest-approach dots -->
+  <circle cx="146.5" cy="109.1" r="3.6" fill="var(--rule-2)" stroke="var(--ground)" stroke-width="1.4"/>
+  <circle cx="146.5" cy="136.3" r="4.2" fill="var(--far)" stroke="var(--ground)" stroke-width="1.4"/>
+
+  <!-- vehicle -->
+  <rect x="163" y="146" width="14" height="22" rx="2.5" fill="var(--ink-2)"/>
+
+  <!-- labels -->
+  <text x="60" y="105" class="svg-lbl" fill="var(--far)" text-anchor="end">s0</text>
+  <text x="280" y="105" class="svg-lbl" fill="var(--far)">s4</text>
+  <text x="103" y="44" class="svg-lbl" fill="var(--ink-3)" text-anchor="end">s1</text>
+  <text x="237" y="44" class="svg-lbl" fill="var(--ink-3)">s3</text>
+  <text x="170" y="24" class="svg-lbl" fill="var(--accent)" text-anchor="middle">s2</text>
+
+  <text x="141" y="107" class="svg-lbl-s" fill="var(--ink-3)" text-anchor="end">s1 최근접 0.40m</text>
+  <text x="141" y="139" class="svg-lbl-s" fill="var(--far)" text-anchor="end" font-weight="600">s0 최근접 0.23m</text>
+  <text x="198" y="172" class="svg-lbl-s" fill="var(--near)">종이컵 벽 (±0.2m)</text>
+</svg>
+<figcaption>
+  좌우 0.2m에 벽이 있을 때 각 섹터가 볼 수 있는 <strong>최소 거리는 <code>0.2 / sin(θ_max)</code></strong>로 결정된다.
+  s1은 아무리 벽에 붙어도 0.40m 밑으로 내려갈 수 없고, s0은 0.23m까지 내려간다.
+  임계값 <code>S_CURVE_SIDE_CLOSE_M = 0.45</code>는 s1에게는 사실상 도달 불가능한 값이다.
+</figcaption>
+</figure>
+
+  <div class="col">
+    <h3>실측이 정확히 이 예측대로 나온다</h3>
+    <p>
+      4개 파일의 섹터별 중앙값이다. s_curve 코스에서 s1/s3는 0.64/0.70m에 머무는 반면
+      s0/s4는 0.38/0.35m로 내려간다.
+    </p>
+  </div>
+
+  <div class="scroll">
+    <table>
+      <caption>단위 m. 5.000 = 미검출(최대치 클램프).</caption>
+      <thead><tr><th>파일</th><th>s0 좌광각</th><th>s1 좌사선</th><th>s2 정면</th><th>s3 우사선</th><th>s4 우광각</th></tr></thead>
+      <tbody>
+        <tr><td>normal_course1</td><td class="num">3.486</td><td class="num">4.268</td><td class="num">4.785</td><td class="num">5.000</td><td class="num">5.000</td></tr>
+        <tr><td>normal_course2</td><td class="num">3.524</td><td class="num">4.464</td><td class="num">5.000</td><td class="num">5.000</td><td class="num">5.000</td></tr>
+        <tr><td><strong>s_curve_course1</strong></td><td class="num good">0.382</td><td class="num miss">0.636</td><td class="num">0.921</td><td class="num miss">0.697</td><td class="num good">0.351</td></tr>
+        <tr><td>avoidance_course1</td><td class="num">2.187</td><td class="num">0.875</td><td class="num">0.987</td><td class="num">1.863</td><td class="num">5.000</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="col">
+    <p>
+      그래서 <code>detect_s_curve()</code>의 기하 조건
+      (<code>s1&lt;0.45 AND s3&lt;0.45 AND s2≥0.35</code>)이 실제로 몇 % 성립하는지 직접 세어봤다.
+    </p>
+  </div>
+
+  <div class="scroll">
+    <table>
+      <caption>같은 임계값을 s0/s4에 적용하면 s_curve만 정확히 골라낸다.</caption>
+      <thead><tr><th>파일</th><th>현재 코드 (s1 &amp; s3)</th><th>제안 (s0 &amp; s4)</th></tr></thead>
+      <tbody>
+        <tr><td>normal_course1</td><td class="num miss">0.0%</td><td class="num">2.5%</td></tr>
+        <tr><td>normal_course2</td><td class="num miss">0.0%</td><td class="num good">0.0%</td></tr>
+        <tr><td><strong>s_curve_course1</strong></td><td class="num hit">0.0%</td><td class="num good">59.0%</td></tr>
+        <tr><td>avoidance_course1</td><td class="num miss">1.3%</td><td class="num">15.4%</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="finding sev-1">
+    <div class="f-head">
+      <span class="tag id">F‑01 · F‑02</span><span class="tag s1">치명</span><span class="tag verified">실측 검증</span>
+    </div>
+    <p class="f-title">지금 S구간이 61.7% 잡히는 건 센서가 아니라 파일명 덕분이다</p>
+    <p>
+      기하 조건이 0%인데도 결과가 나온 이유는 <code>scenario.py</code>의 파일명 prior 분기가
+      훨씬 느슨한 <code>min(s1,s3) &lt; 0.45</code>(AND가 아닌 최솟값)를 쓰기 때문이다.
+      즉 <strong>파일명을 <code>s_curve_</code>로 붙이지 않은 코스에서는 S구간이 전혀 검출되지 않는다.</strong>
+      요구사항 §2("파일명은 강한 prior, 센서가 frame-level을 결정")와 정확히 반대로 동작하고 있다.
+    </p>
+  </div>
+
+  <div class="note">
+    <span class="note-k">부가 소득</span>
+    <p>
+      실측값을 역산하면 유효 측방 여유는 0.2m가 아니라 <strong>약 0.32m</strong>다
+      (s0: 0.382 = 0.32/sin 59.8°, s1: 0.636 ≈ 0.32/sin 29.9° — 두 섹터가 같은 값으로 수렴).
+      차선폭 40cm 가정보다 차량이 여유 있게 지나가고 있다는 뜻이므로,
+      임계값을 0.45m로 두면 s0/s4 기준에서 적절한 마진이 된다.
+    </p>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════ -->
+<section id="camera-dead">
+  <div class="sec-head"><span class="sec-num">03</span><h2>카메라 증거는 켜져 있던 적이 없다</h2></div>
+
+  <div class="col">
+    <p>
+      <code>sensor_evidence.py</code>의 <code>cam_threat</code>는 <code>obj{i}_valid</code>가 참일 때만 작동한다.
+      실측 발생률은 다음과 같다.
+    </p>
+  </div>
+
+  <div class="scroll">
+    <table>
+      <caption>프레임당 5개 오브젝트 슬롯 기준.</caption>
+      <thead><tr><th>파일</th><th>obj_valid 발생</th><th>전체 슬롯</th><th>비율</th></tr></thead>
+      <tbody>
+        <tr><td>normal_course1</td><td class="num">5</td><td class="num">4,190</td><td class="num">0.12%</td></tr>
+        <tr><td>normal_course2</td><td class="num hit">0</td><td class="num">3,300</td><td class="num hit">0.00%</td></tr>
+        <tr><td>s_curve_course1</td><td class="num hit">0</td><td class="num">1,855</td><td class="num hit">0.00%</td></tr>
+        <tr><td>avoidance_course1</td><td class="num hit">0</td><td class="num">1,855</td><td class="num hit">0.00%</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="finding sev-1">
+    <div class="f-head"><span class="tag id">F‑03</span><span class="tag s1">치명</span><span class="tag verified">실측 검증</span></div>
+    <p class="f-title">YOLO는 종이컵을 볼 수 없다 — 클래스에 존재하지 않는다</p>
+    <p>
+      <code>yolo_config.py</code>의 13개 클래스는 BFMC 대회용 표지판·차량·보행자다.
+      <code>one_way_road_sign</code>, <code>stop_sign</code>, <code>pedestrian</code>, <code>car</code> …
+      <strong>종이컵은 어느 클래스에도 해당하지 않는다.</strong>
+      기존 코드 주석은 이를 "카메라 파이프라인이 개선되면 자동으로 다시 유효해진다"고 적어두었지만,
+      실제로는 <em>모델을 다시 학습시키기 전까지 영원히 False</em>다.
+      현재 이 코스에서 <code>cam_threat</code>, <code>CAMERA_OBJ_DANGER_NORM</code>,
+      그리고 그에 딸린 모든 판정 분기는 실행되지 않는 죽은 코드다.
+    </p>
+  </div>
+
+  <div class="finding sev-1">
+    <div class="f-head"><span class="tag id">F‑06</span><span class="tag s1">치명</span><span class="tag verified">코드 확인</span></div>
+    <p class="f-title">depth 구멍이 "가장 먼 거리"로 기록된다 — 부호가 뒤집혀 있다</p>
+<pre><code><span class="cmt"># collect_data_planner.py : _yolo_worker</span>
+raw  = int(depth_array[cy, cx])
+dist = raw * depth_scale if raw &gt; 0 else <span class="del">-1.0</span>
+
+<span class="cmt"># planner_model.py : build_object_features</span>
+dist_norm = min(max(dist,0), MAX_DIST_M)/MAX_DIST_M if dist &gt; 0 else <span class="del">1.0</span>
+<span class="cmt">#                                                                    ↑ 1.0 = 5m = 가장 멂</span></code></pre>
+    <p>
+      D435가 depth를 못 읽으면(무텍스처·최소거리 미만·과노출) <code>raw = 0</code>이 되고,
+      이 값은 <code>-1</code>을 거쳐 <strong><code>dist_norm = 1.0</code>, 즉 "5m 밖"</strong>으로 기록된다.
+      가장 가까워서 못 읽은 물체가 가장 먼 물체로 학습되는 구조다.
+      Behavior Cloning 관점에서 이보다 나쁜 라벨 오염은 드물다.
+      <code>valid=0</code>으로 빼거나 별도 <code>dist_unknown</code> 플래그를 두어야 한다.
+    </p>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════ -->
+<section id="timing">
+  <div class="sec-head"><span class="sec-num">04</span><h2>시간 상수가 전부 3배 틀렸다</h2></div>
+
+  <div class="col">
+    <p>
+      <code>config.py</code>의 주석은 30fps를 가정하지만, <code>collect_data_planner.py</code>는
+      <code>SAVE_FPS = 10</code>으로 저장 속도를 제한한다. 실제 프레임 간격은 <strong>0.1초</strong>다.
+    </p>
+  </div>
+
+  <div class="scroll">
+    <table>
+      <caption>모든 시계열 상수가 의도보다 3배 긴 시간을 커버하고 있다.</caption>
+      <thead><tr><th>상수</th><th>값</th><th>주석의 의도</th><th>실제 (10fps)</th><th>판정</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">MIN_STOP_FRAMES</td><td class="num">5</td><td class="num">0.17초</td><td class="num hit">0.50초</td><td>정지 검출 둔감</td></tr>
+        <tr><td class="mono">APPROACH_TREND_WINDOW</td><td class="num">15</td><td class="num">0.5초</td><td class="num hit">1.50초</td><td>접근 감지 과도</td></tr>
+        <tr><td class="mono">CONTEXT_PAD</td><td class="num">5</td><td>—</td><td class="num">±0.5초</td><td>허용</td></tr>
+        <tr><td class="mono">S_CURVE_WINDOW</td><td class="num">5</td><td>—</td><td class="num">0.5초</td><td>허용</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="finding sev-1">
+    <div class="f-head"><span class="tag id">F‑04</span><span class="tag s1">치명</span><span class="tag verified">실측 검증</span></div>
+    <p class="f-title">특히 MIN_STOP_FRAMES가 요구사항 §6을 직접 훼손한다</p>
+    <p>
+      0.5초 미만의 짧은 정지는 <code>is_stop = False</code>가 되고,
+      <code>stop_state</code>에 들어가지 못해 <strong>재출발 상태머신이 아예 열리지 않는다</strong>.
+      "STOP → RECOVERY가 매우 중요"하다면 이 값은 10fps 기준 <code>2</code>(0.2초)로 낮추고,
+      대신 증거 강도로 걸러야 한다.
+    </p>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════ -->
+<section id="recovery">
+  <div class="sec-head"><span class="sec-num">05</span><h2>RECOVERY가 1프레임만 라벨된다</h2></div>
+
+  <div class="col">
+    <p>
+      요구사항 §6은 <code>0 → 0.4 → 0.7 → 0.85 → 0.95</code> <strong>전체 transition</strong>이
+      재출발 행동이라고 명시한다. 현재 구현은 그렇지 않다.
+    </p>
+  </div>
+
+<pre><code><span class="cmt"># scenario.py — 현재</span>
+if awaiting and thr[i] &gt; MOTOR_DEAD_ZONE_MAX and (clr[i] or relax_clear):
+    is_recovery.loc[idx[i]] = True   <span class="del">← breakaway를 넘은 그 한 프레임만</span>
+    awaiting = False</code></pre>
+
+  <div class="col">
+    <p>
+      실측에서 4개 파일 전체 recovery 프레임이 <strong>10개</strong>에 불과한 것이 그 증거다
+      (파일당 2~4개 = 이벤트당 1프레임).
+      <code>0.4</code>와 <code>0.7</code> 프레임은 RECOVERY 라벨을 받지 못하며,
+      <code>is_protected</code>의 ±2 dilation에 우연히 걸려야만 스무딩을 면한다.
+      <strong>보호는 우연에 맡기고 라벨은 잃는 구조다.</strong>
+    </p>
+    <h3>고쳐야 할 방향</h3>
+    <p>
+      "정지 종료" 시점부터 "breakaway 최초 초과" 시점까지 <em>구간 전체</em>를 RECOVERY로 칠해야 한다.
+      아래 §7에 교체 코드를 실었다.
+    </p>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════ -->
+<section id="fsm">
+  <div class="sec-head"><span class="sec-num">06</span><h2>상태머신 설계</h2></div>
+
+  <div class="col">
+    <p>
+      요구사항 §11의 전이도를 현재 코드와 대조하면, <code>APPROACHING</code>이 없고
+      <code>RECOVERY</code>가 점(point)으로 축약되어 있다. 아래가 제안 구조다.
+    </p>
+  </div>
+
+  <div class="fsm">
+    <div class="fsm-row">
+      <div class="fsm-node n-normal">NORMAL</div>
+      <div class="fsm-arrow">→ front↓ &amp; front&lt;CLEAR</div>
+      <div class="fsm-node n-appr dashed">APPROACHING</div>
+    </div>
+    <div class="fsm-gap"></div>
+    <div class="fsm-row">
+      <div class="fsm-node n-appr">AVOIDANCE</div>
+      <div class="fsm-arrow">← throttle 유지 &nbsp;|&nbsp; throttle→0 →</div>
+      <div class="fsm-node n-stop">STOP</div>
+    </div>
+    <div class="fsm-gap"></div>
+    <div class="fsm-row">
+      <div class="fsm-node n-stop">STOP</div>
+      <div class="fsm-arrow">→ front clear (hysteresis)</div>
+      <div class="fsm-node n-rec dashed">CLEARED · 대기</div>
+    </div>
+    <div class="fsm-gap"></div>
+    <div class="fsm-row">
+      <div class="fsm-node n-rec">RECOVERY</div>
+      <div class="fsm-arrow">→ throttle &gt; DEAD_ZONE 도달</div>
+      <div class="fsm-node n-normal">NORMAL</div>
+    </div>
+  </div>
+
+  <div class="col">
+    <p>
+      <code>APPROACHING</code>과 <code>CLEARED</code>는 요구사항대로 내부 상태로만 두고
+      최종 라벨로 저장하지 않아도 된다. 다만 <strong>파생 피처로는 반드시 내보내야 한다</strong> — 이유는 다음 절에.
+    </p>
+    <h3>S구간이 이 전이도에 들어가면 안 되는 이유</h3>
+    <p>
+      S구간은 <em>상태</em>가 아니라 <em>맥락</em>이다. 좌우가 좁은 채로 NORMAL·AVOIDANCE·STOP이
+      전부 일어날 수 있다. 현재 코드가 <code>is_s_curve</code>를 우선순위 표에서
+      AVOIDANCE보다 <em>낮게</em> 둔 것은 옳은 선택이다. 다만 라벨이 아니라
+      <strong>불리언 맥락 플래그</strong>로 분리하고, STOP 증거 판정에서
+      "정면 위협을 STOP으로 승격하지 않는" 게이트로만 쓰는 편이 명확하다.
+    </p>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════ -->
+<section id="temporal">
+  <div class="sec-head"><span class="sec-num">07</span><h2>목표를 가로막는 진짜 병목</h2></div>
+
+  <div class="col">
+    <p>
+      여기까지는 전처리 이야기였다. 그런데 요구사항 §1의 최종 목표
+      — "시간적인 행동 패턴을 학습" — 은 전처리만으로는 <strong>달성 불가능하다</strong>.
+    </p>
+    <p>
+      <code>PlannerModel</code>의 입력을 보자.
+    </p>
+  </div>
+
+<pre><code>objects (40)  lane (72)  lidar (5)  ego (2)  scenario (1)
+                                     └─ [prev_steering, prev_throttle]</code></pre>
+
+  <div class="finding sev-1">
+    <div class="f-head"><span class="tag id">F‑09</span><span class="tag s1">치명</span><span class="tag verified">설계</span></div>
+    <p class="f-title">STOP과 RECOVERY는 모델 입력상 구분이 불가능하다</p>
+    <p>
+      "정지 3초째"와 "정지 0.1초째"는 센서 관측이 동일하다.
+      정면도 똑같이 막혀 있고, lane도 같고, <code>prev_throttle</code>도 둘 다 0이다.
+      <strong>모델이 언제 재출발해야 하는지 알 수 있는 정보가 입력에 존재하지 않는다.</strong>
+      전처리에서 RECOVERY 라벨을 아무리 정성껏 보존해도, 모델은 같은 입력에 서로 다른 출력이
+      달린 모순 샘플로 받아들이고 그 평균(≈ 어중간한 스로틀)을 학습한다.
+    </p>
+  </div>
+
+  <div class="col">
+    <h3>해법: 추론 시점에도 계산 가능한 시간 피처를 추가한다</h3>
+    <p>
+      augment 단계에서 아래 4개를 계산해 CSV 컬럼으로 내보내고, 모델 입력에 붙인다.
+      전부 <strong>과거 관측만으로 실시간 계산 가능</strong>하므로 label leakage가 아니다.
+    </p>
+  </div>
+
+  <div class="scroll">
+    <table>
+      <caption>모두 <code>_src_idx</code> 그룹 내부에서만 계산 — 파일 경계 오염 없음.</caption>
+      <thead><tr><th>컬럼</th><th>정의</th><th>무엇을 가능하게 하는가</th></tr></thead>
+      <tbody>
+        <tr><td class="mono">front_delta</td><td>front_dist(t) − front_dist(t−5)</td><td>APPROACHING 감지 · 접근 속도</td></tr>
+        <tr><td class="mono">stop_duration</td><td>throttle&lt;0.1 연속 프레임 / 30, clip 0–1</td><td><strong>STOP ↔ RECOVERY 구분</strong></td></tr>
+        <tr><td class="mono">front_min_recent</td><td>최근 10프레임 front 최솟값</td><td>순간 노이즈에 강한 위협 판단</td></tr>
+        <tr><td class="mono">side_gap</td><td>min(s0, s4) — 진짜 측방 여유</td><td>S구간 맥락 · 통과 가능 폭</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="note warn">
+    <span class="note-k">함정 — scenario 컬럼에 분류 결과를 넣지 말 것</span>
+    <p>
+      F‑10에서 확인했듯 4개 CSV 모두 <code>scenario = 0</code>이라
+      임베딩(<code>N_SCENARIOS=10</code>)이 죽은 파라미터로 남아 있다.
+      "그럼 ScenarioClassifier 결과를 넣자"가 자연스러운 결론처럼 보이지만 <strong>하면 안 된다.</strong>
+    </p>
+    <p>
+      <code>scenario=STOP</code>을 입력으로 주면 모델은 "STOP이면 throttle=0"이라는 자명한 규칙만 배운다.
+      그런데 추론 시점에는 STOP인지 <em>모른다</em> — 그게 바로 예측해야 할 대상이다.
+      이건 causal confusion의 교과서적 사례다. <code>scenario</code>는
+      "차선주행 / 주차" 같은 <strong>임무 명령</strong>으로만 남기고, 상태는 위의 파생 피처로 넣어야 한다.
+    </p>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════ -->
+<section id="d435">
+  <div class="sec-head"><span class="sec-num">08</span><h2>D435 / D435i를 제대로 쓰는 법</h2></div>
+
+  <div class="col">
+    <p>
+      현재 <code>camera.py</code>는 depth 스트림을 켜고 정렬까지 해놓고,
+      그 결과를 <strong>YOLO 바운딩박스 중심 픽셀 1개</strong>로만 소비한 뒤 버린다.
+      848×480 = 40만 픽셀의 깊이 정보 중 실제로 쓰이는 건 프레임당 최대 5픽셀이다.
+      그리고 §03에서 봤듯 그 5픽셀조차 거의 항상 발생하지 않는다.
+    </p>
+
+    <h3>먼저 D435의 물리적 한계를 명확히</h3>
+  </div>
+
+  <div class="scroll">
+    <table>
+      <caption>D435 depth 사양. 정확한 Min-Z는 해상도·disparity shift 설정에 따라 달라지므로 실측 확인 권장.</caption>
+      <thead><tr><th>항목</th><th>값</th><th>이 코스에서의 함의</th></tr></thead>
+      <tbody>
+        <tr><td>Depth FOV</td><td class="num">87° × 58°</td><td>±43.5° — 라이다 s2(±9.9°)보다 훨씬 넓다</td></tr>
+        <tr><td>RGB FOV</td><td class="num">69° × 42°</td><td class="hit">align(color) 시 depth가 69°로 잘림</td></tr>
+        <tr><td>Min-Z @848×480</td><td class="num">≈0.17 m</td><td class="hit">0.2m 옆 컵은 최소거리 경계 — 구멍 발생</td></tr>
+        <tr><td>정확도 @2m</td><td class="num">&lt;2%</td><td>0.3–2m가 최적 구간</td></tr>
+        <tr><td>오차 증가</td><td class="num">z²에 비례</td><td class="hit">MAX_DIST_M=5.0은 신뢰 구간 밖</td></tr>
+        <tr><td>Depth 셔터</td><td>글로벌</td><td class="good">주행 중 모션블러 없음 — 유리</td></tr>
+        <tr><td>RGB 셔터</td><td>롤링</td><td>차선 세그멘테이션에 왜곡 유입</td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="finding sev-2">
+    <div class="f-head"><span class="tag id">D‑01</span><span class="tag s2">중대</span></div>
+    <p class="f-title">측면 종이컵은 카메라로 볼 수 없다 — 역할 분담이 맞다</p>
+    <p>
+      0.2m 옆의 컵이 depth FOV(±43.5°) 안에 들어오려면 종방향 거리가 0.21m 이내여야 하는데,
+      그건 이미 Min-Z 경계다. <strong>측면은 라이다(s0/s4), 정면은 카메라</strong>라는
+      현재의 암묵적 분담은 물리적으로 옳다. 카메라로 S구간 폭을 재려는 시도는 하지 말 것.
+    </p>
+  </div>
+
+  <div class="finding sev-1">
+    <div class="f-head"><span class="tag id">D‑02</span><span class="tag s1">치명</span></div>
+    <p class="f-title">IR 프로젝터 설정이 없다 — 흰 종이컵은 무텍스처다</p>
+    <p>
+      D435는 active IR stereo다. 흰 종이컵처럼 텍스처가 없는 표면은
+      <strong>IR 패턴 프로젝터 없이는 스테레오 매칭이 실패</strong>해 depth 구멍이 된다.
+      현재 <code>camera.py</code>에는 emitter 관련 코드가 전혀 없어 SDK 기본값에 의존하고 있다.
+      이것이 obj_dist가 신뢰할 수 없는 근본 원인 중 하나다.
+    </p>
+<pre><code><span class="cmt"># camera.py __init__ 에 추가</span>
+depth_sensor.set_option(rs.option.emitter_enabled, 1)
+depth_sensor.set_option(rs.option.laser_power, 240)   <span class="cmt"># 최대 360</span>
+depth_sensor.set_option(rs.option.visual_preset,
+                        rs.rs400_visual_preset.high_density)</code></pre>
+    <p>
+      장애물 <em>존재 여부</em>가 중요하므로 <code>high_accuracy</code>(구멍 많음)보다
+      <code>high_density</code>가 맞다. 정밀 측距가 아니라 "막혔나?"를 묻는 작업이기 때문이다.
+    </p>
+  </div>
+
+  <div class="finding sev-2">
+    <div class="f-head"><span class="tag id">D‑03</span><span class="tag s2">중대</span></div>
+    <p class="f-title">후처리 필터가 하나도 적용되지 않았다</p>
+    <p>
+      RealSense SDK가 제공하는 spatial / temporal / hole-filling 필터가 전혀 쓰이지 않은 채
+      <strong>단일 픽셀을 샘플링</strong>하고 있다. 이 조합은 최악이다 — 필터 없는 raw depth의
+      픽셀 단위 노이즈와 구멍을 그대로 맞는다. 최소한 bbox 내부 ROI의
+      <em>유효값 중앙값</em>으로 바꾸는 것만으로도 크게 개선된다.
+    </p>
+<pre><code><span class="cmt"># _yolo_worker — 단일 픽셀 → ROI 중앙값</span>
+x1,y1,x2,y2 = [int(v) for v in box]
+mx, my = int((x2-x1)*0.25), int((y2-y1)*0.25)   <span class="cmt"># 내부 50%만</span>
+roi = depth_array[y1+my:y2-my, x1+mx:x2-mx]
+valid = roi[roi &gt; 0]
+<span class="add">dist = float(np.median(valid)) * depth_scale if valid.size &gt;= 10 else -1.0</span></code></pre>
+  </div>
+
+  <div class="finding sev-2">
+    <div class="f-head"><span class="tag id">D‑04</span><span class="tag s2">중대 · 최대 기회</span></div>
+    <p class="f-title">depth를 라이다처럼 섹터화하면 종이컵이 보인다</p>
+    <p>
+      YOLO 클래스에 없는 물체를 감지하는 유일한 방법이다.
+      depth 이미지 하단부를 세로 컬럼으로 나눠 각 컬럼의 유효 depth 하위 백분위수를 취하면,
+      <strong>클래스에 무관한 정면 자유공간 프로파일</strong>이 나온다.
+    </p>
+<pre><code><span class="cmt"># 새 함수 — collect_data_planner.py</span>
+def depth_to_free_space(depth_m, n_cols=9, row_lo=0.45, row_hi=0.95):
+    h, w = depth_m.shape
+    band = depth_m[int(h*row_lo):int(h*row_hi), :]
+    out = []
+    for c in np.array_split(np.arange(w), n_cols):
+        col = band[:, c[0]:c[-1]+1]
+        v = col[(col &gt; 0.15) &amp; (col &lt; 4.0)]
+        out.append(float(np.percentile(v, 5)) if v.size &gt;= 20 else 4.0)
+    return out          <span class="cmt"># depth_c0 … depth_c8</span></code></pre>
+    <p>
+      라이다 대비 이점이 분명하다. 라이다는 <strong>단일 수평면</strong>만 스캔하므로
+      마운트 높이보다 낮거나 높은 장애물을 놓치지만, depth는 높이 방향 정보를 포함한다.
+      종이컵처럼 낮은 물체에 특히 유효하다.
+    </p>
+  </div>
+
+  <div class="finding sev-2">
+    <div class="f-head"><span class="tag id">D‑05</span><span class="tag s2">D435i 한정</span></div>
+    <p class="f-title">IMU가 있다면 "실제로 멈췄는가"를 알 수 있다</p>
+    <p>
+      D435i에는 BMI055 IMU(accel 250Hz / gyro 200Hz)가 들어 있고, 현재 스트림을 켜지 않고 있다.
+      이게 해결해주는 문제가 큰데, <strong>지금 파이프라인은 "명령 throttle이 0"인 것만 알 뿐
+      차량이 실제로 정지했는지 모른다.</strong>
+    </p>
+    <ul>
+      <li>STOP 증거가 <em>명령값 추론</em>에서 <em>물리 측정</em>으로 승격된다 — 지금까지 논의한 zero-event 판정 로직 상당 부분이 불필요해진다</li>
+      <li><code>MOTOR_DEAD_ZONE_MAX = 0.85</code>를 추측이 아니라 실측 캘리브레이션으로 확정할 수 있다</li>
+      <li>요레이트를 얻으면 조향 정규화값 ↔ 실제 조향각 관계가 확정된다 (현재 저장소 어디에도 축거·속도 캘리브레이션 값이 없다)</li>
+      <li>노이즈 zero-event와 진짜 정지가 <strong>가속도계로 즉시 구분</strong>된다</li>
+    </ul>
+<pre><code>cfg.enable_stream(rs.stream.accel, rs.format.motion_xyz32f, 250)
+cfg.enable_stream(rs.stream.gyro,  rs.format.motion_xyz32f, 200)</code></pre>
+    <p>
+      먼저 <code>rs-enumerate-devices</code>로 D435인지 D435i인지 확인하는 것이 순서다.
+    </p>
+  </div>
+
+  <div class="finding sev-3">
+    <div class="f-head"><span class="tag id">D‑06</span><span class="tag s3">보통</span></div>
+    <p class="f-title">자동 노출이 차선 세그멘테이션을 흔들고 있을 가능성</p>
+    <p>
+      s_curve 코스의 lane grid 합이 중앙값 0.04, 31%가 완전히 0이다(F‑07).
+      BiSeNet이 이 구간에서 차선을 거의 못 잡는다는 뜻인데,
+      프레임마다 변하는 자동 노출이 원인의 일부일 수 있다.
+      노출을 고정하거나 ROI를 노면으로 한정해 재수집 시 비교해볼 값이 있다.
+      다만 컵 코스에 애초에 차선 도색이 없다면 이건 정상이며,
+      그 경우 <strong>lane 증거는 이 코스에서 사용을 포기</strong>하는 것이 맞다.
+    </p>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════ -->
+<section id="patches">
+  <div class="sec-head"><span class="sec-num">09</span><h2>구체적 수정 코드</h2></div>
+
+  <div class="col">
+    <p>
+      기존 구조를 유지한 최소 변경만 싣는다. 재수집 없이 지금 데이터에 바로 적용 가능한 것들이다.
+    </p>
+    <h3>① config.py — 섹터 재지정과 시간 상수 정정</h3>
+  </div>
+
+<pre><code><span class="cmt"># ── LiDAR 섹터 ──────────────────────────────────────</span>
+<span class="cmt"># [실측] 1000점/360° = 0.36°/idx 로 환산한 실제 각도:</span>
+<span class="cmt">#   s2 = ±9.9°   s1/s3 = 9.7~29.9°   s0/s4 = 29.9~59.8°</span>
+<span class="cmt"># 0.2m 옆 벽에 대한 최소 관측거리 = 0.2/sin(θmax)</span>
+<span class="cmt">#   s1 → 0.40m (임계 0.45에 도달 불가) / s0 → 0.23m</span>
+FRONT_LIDAR_COL  = "lidar_s2"
+<span class="del">- SIDE_LIDAR_COLS = ["lidar_s1", "lidar_s3"]</span>
+<span class="add">+ SIDE_LIDAR_COLS   = ["lidar_s0", "lidar_s4"]   # 진짜 측면(30~60°)</span>
+<span class="add">+ OBLIQUE_LIDAR_COLS = ["lidar_s1", "lidar_s3"]  # 전방 사선 — 회피 판정 보조</span>
+
+<span class="cmt"># ── 시간 상수 : SAVE_FPS = 10 → 1프레임 = 0.1초 ────────</span>
+<span class="del">- MIN_STOP_FRAMES = 5          # 주석은 30fps 0.17초 → 실제 0.5초</span>
+<span class="add">+ MIN_STOP_FRAMES = 2          # 0.2초 @10fps</span>
+<span class="del">- APPROACH_TREND_WINDOW = 15   # 주석은 0.5초 → 실제 1.5초</span>
+<span class="add">+ APPROACH_TREND_WINDOW = 5    # 0.5초 @10fps</span>
+
+<span class="cmt"># ── lane 증거 최소 신뢰 하한 (F-07) ────────────────────</span>
+<span class="cmt"># s_curve 코스의 baseline은 0.003 — 상대비율 판정이 무의미해진다.</span>
+<span class="add">+ LANE_BASELINE_MIN = 0.05     # 이 미만이면 lane 증거 자체를 비활성화</span>
+
+<span class="cmt"># ── 카메라 증거 (F-03) ─────────────────────────────────</span>
+<span class="cmt"># yolo_best.pt 13클래스에 종이컵이 없어 구조적으로 항상 False.</span>
+<span class="cmt"># depth 기반 감지가 들어오기 전까지 명시적으로 비활성화한다.</span>
+<span class="add">+ CAMERA_EVIDENCE_ENABLED = False</span></code></pre>
+
+  <div class="col">
+    <h3>② sensor_evidence.py — s0/s4를 측면으로, s1/s3를 사선으로 분리</h3>
+  </div>
+
+<pre><code><span class="cmt"># compute_sensor_evidence() 내부</span>
+<span class="add">+ # 전방 사선(s1/s3) — 회피 판정 보조용. STOP 증거로는 쓰지 않는다.</span>
+<span class="add">+ if all(c in df.columns for c in OBLIQUE_LIDAR_COLS):</span>
+<span class="add">+     ev["oblique_dist"] = _grouped_rolling_min(</span>
+<span class="add">+         df[OBLIQUE_LIDAR_COLS].min(axis=1).astype(float), grp, smooth_window)</span>
+<span class="add">+ else:</span>
+<span class="add">+     ev["oblique_dist"] = 999.0</span>
+
+<span class="cmt"># 카메라 게이트</span>
+<span class="del">- ev["cam_threat"] = (valid_mat &amp; (dist_mat &lt; CAMERA_OBJ_DANGER_NORM)).any(axis=1)</span>
+<span class="add">+ if CAMERA_EVIDENCE_ENABLED:</span>
+<span class="add">+     ev["cam_threat"] = (valid_mat &amp; (dist_mat &lt; CAMERA_OBJ_DANGER_NORM)).any(axis=1)</span>
+<span class="add">+ else:</span>
+<span class="add">+     ev["cam_threat"] = False</span>
+
+<span class="add">+ # ── 시간 파생 피처 (F-09) — 추론 시에도 계산 가능 ──────</span>
+<span class="add">+ ev["front_delta"] = (ev["front_dist"]</span>
+<span class="add">+     .groupby(grp, group_keys=False).transform(lambda s: s.diff(5)).fillna(0.0))</span>
+<span class="add">+ ev["front_min_recent"] = _grouped_rolling_min(ev["front_dist"], grp, 10)</span>
+<span class="add">+ ev["side_gap"] = ev["side_dist"]</span>
+<span class="add">+ </span>
+<span class="add">+ near_zero = df["target_throttle"] &lt; ZERO_EVENT_THRESH</span>
+<span class="add">+ run = near_zero.groupby(grp, group_keys=False).transform(</span>
+<span class="add">+           lambda s: s.ne(s.shift()).cumsum())</span>
+<span class="add">+ ev["stop_duration"] = (near_zero.groupby([grp, run]).cumsum()</span>
+<span class="add">+                        .where(near_zero, 0).clip(upper=30) / 30.0)</span></code></pre>
+
+  <div class="col">
+    <h3>③ scenario.py — S구간 검출과 RECOVERY 구간화</h3>
+  </div>
+
+<pre><code><span class="cmt"># detect_s_curve() — side_left/right가 이제 s0/s4를 가리키므로</span>
+<span class="cmt"># 임계값은 그대로 두되, 파일명 prior 분기의 느슨한 min() 조건을 제거한다.</span>
+<span class="cmt"># (기하 조건이 실제로 작동하므로 prior 목발이 더는 필요 없다)</span>
+<span class="del">- is_s_curve = is_s_curve | (s_curve_prior</span>
+<span class="del">-     &amp; (ev["front_dist"] &gt;= S_CURVE_FRONT_OPEN_M)</span>
+<span class="del">-     &amp; (ev["side_dist"]  &lt;  S_CURVE_SIDE_CLOSE_M))</span>
+<span class="add">+ # prior는 임계값을 완화하는 방향으로만 (비대칭 원칙 유지)</span>
+<span class="add">+ is_s_curve = is_s_curve | (s_curve_prior</span>
+<span class="add">+     &amp; (ev["front_dist"] &gt;= S_CURVE_FRONT_OPEN_M)</span>
+<span class="add">+     &amp; (ev["side_left"]  &lt;  S_CURVE_SIDE_CLOSE_M * 1.3)</span>
+<span class="add">+     &amp; (ev["side_right"] &lt;  S_CURVE_SIDE_CLOSE_M * 1.3))</span>
+
+<span class="cmt"># lane 증거 — baseline 신뢰 하한 (F-07)</span>
+<span class="del">- if not pd.isna(base_lane) and base_lane &gt; 0:</span>
+<span class="add">+ if not pd.isna(base_lane) and base_lane &gt;= LANE_BASELINE_MIN:</span>
+      lane_mean = ev["lane_sum"].loc[ev_idx].mean()
+      lane_hit  = lane_mean &lt; LANE_VIS_DROP_RATIO * base_lane
+
+<span class="cmt"># approach trend — 단일 프레임 → 구간 중앙값 (F-08)</span>
+<span class="del">- trend_idx = idx[max(0, local_s - APPROACH_TREND_WINDOW)]</span>
+<span class="del">- approach_drop = ev["front_dist"].loc[trend_idx] - dmin</span>
+<span class="add">+ trend_slice = idx[max(0, local_s - APPROACH_TREND_WINDOW):max(1, local_s)]</span>
+<span class="add">+ pre_level = ev["front_dist"].loc[trend_slice].median() if len(trend_slice) else dmin</span>
+<span class="add">+ approach_drop = pre_level - dmin</span></code></pre>
+
+<pre><code><span class="cmt"># ── RECOVERY 상태머신 — 점(point) → 구간(span) (F-05) ────</span>
+is_recovery = pd.Series(False, index=df.index)
+
+for gid, sub in df.groupby(grp):
+    idx = sub.index
+    ss  = stop_state.loc[idx].to_numpy()
+    thr = throttle.loc[idx].to_numpy()
+    clr = obstacle_cleared.loc[idx].to_numpy()
+    relax_clear = (sub["_scenario_type"].iloc[0] == SCENARIO_RECOVERY)
+
+    awaiting, span_start = False, None
+    for i in range(len(idx)):
+        if ss[i]:
+            awaiting, span_start = False, None
+            continue
+        if i &gt; 0 and ss[i-1] and not ss[i]:
+<span class="add">+           awaiting, span_start = True, i      # 정지가 끝난 지점부터 기록 시작</span>
+        if awaiting and (clr[i] or relax_clear):
+            if thr[i] &gt; MOTOR_DEAD_ZONE_MAX:
+<span class="add">+               # 정지 종료 ~ breakaway 초과까지 구간 전체를 RECOVERY로</span>
+<span class="add">+               is_recovery.loc[idx[span_start:i+1]] = True</span>
+                awaiting, span_start = False, None
+<span class="add">+           elif i - span_start &gt; 30:            # 3초 내 재출발 없으면 포기</span>
+<span class="add">+               awaiting, span_start = False, None</span></code></pre>
+
+  <div class="col">
+    <h3>④ augmentation.py — 시나리오별 증강 차등화 강화</h3>
+    <p>
+      현재는 <code>noise</code> 제외와 <code>avoidance</code> mirror 스킵 두 가지뿐이다.
+      요구사항 §3의 정책을 반영하려면 STOP/RECOVERY의 라벨을 흔드는 증강을 막아야 한다.
+    </p>
+  </div>
+
+<pre><code><span class="cmt"># config.py</span>
+<span class="add">+ # STOP/RECOVERY는 throttle 값 자체가 행동의 핵심이므로</span>
+<span class="add">+ # 거리 스케일링처럼 "상황을 바꾸는" 증강을 적용하지 않는다.</span>
+<span class="add">+ SCENARIOS_NO_DIST_SCALE = (SCENARIO_STOP, SCENARIO_RECOVERY)</span>
+
+<span class="cmt"># augmentation.py — AUGMENTATIONS 튜플에 4번째 플래그 추가</span>
+<span class="cmt"># (이름, 함수, 반복, is_mirror, changes_geometry)</span>
+("distance_scale", aug_distance_scale, 1, False, <span class="add">True</span>),
+
+<span class="cmt"># augment() 루프</span>
+<span class="add">+ no_scale = frame_labels.isin(SCENARIOS_NO_DIST_SCALE).to_numpy()</span>
+  for name, fn, weight, is_mirror, changes_geom in AUGMENTATIONS:
+      if is_mirror and skip_mirror:            continue
+<span class="add">+     if changes_geom and no_scale[row_i]:     continue</span></code></pre>
+
+  <div class="note warn">
+    <span class="note-k">주의 — 현재 Augmentor는 파일 단위로만 판정한다</span>
+    <p>
+      <code>augment()</code>는 <code>df["_scenario_type"]</code>(파일명)으로 mirror 스킵을 결정하므로,
+      <strong>avoidance 파일 전체</strong>가 mirror에서 빠진다. 실측에서 avoidance_course1의
+      실제 AVOIDANCE 프레임은 15.9%뿐인데 742행(=371×2) 전부가 스킵됐다.
+      나머지 84%의 정상 주행 데이터가 mirror 증강 기회를 잃은 것이다.
+      <code>scenario_labels</code>(프레임 단위)를 쓰도록 바꾸면 해결된다.
+    </p>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════ -->
+<section id="expected">
+  <div class="sec-head"><span class="sec-num">10</span><h2>수정 후 예상 분류</h2></div>
+
+  <div class="col">
+    <p>
+      요구사항 §10의 6개 CASE에 위 수정을 적용했을 때의 판정이다.
+      괄호 안은 그 판정을 내리는 근거 신호다.
+    </p>
+  </div>
+
+  <div class="scroll">
+    <table>
+      <caption>side = min(s0,s4). 현재 코드에서 CASE 1·6이 뒤집히는 것이 핵심 개선.</caption>
+      <thead><tr><th>CASE</th><th>front</th><th>side</th><th>throttle</th><th>현재 코드</th><th>수정 후</th></tr></thead>
+      <tbody>
+        <tr><td>1 · S구간 주행</td><td class="num">0.90</td><td class="num">0.35</td><td class="num">0.95</td><td class="hit">파일명 없으면 NORMAL</td><td class="good">S_CURVE 맥락 + NORMAL</td></tr>
+        <tr><td>2 · 정면 접근</td><td class="num">0.45↓</td><td class="num">2.0</td><td class="num">0.90</td><td>AVOIDANCE</td><td class="good">APPROACHING → AVOIDANCE</td></tr>
+        <tr><td>3 · 정면 정지</td><td class="num">0.20</td><td class="num">2.0</td><td class="num">0.00</td><td>STOP</td><td class="good">STOP</td></tr>
+        <tr><td>4 · 장애물 제거</td><td class="num">1.80</td><td class="num">2.0</td><td class="num">0.00</td><td>—</td><td class="good">CLEARED 대기</td></tr>
+        <tr><td>5 · 재출발</td><td class="num">1.80</td><td class="num">2.0</td><td class="num">0.4→0.95</td><td class="hit">마지막 1프레임만</td><td class="good">구간 전체 RECOVERY</td></tr>
+        <tr><td>6 · S구간 + 정면 여유</td><td class="num">0.65</td><td class="num">0.22</td><td class="num">0.90</td><td class="hit">side 증거로 오탐 가능</td><td class="good">NORMAL (S_CURVE 게이트)</td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<!-- ══════════════════════════════════════════ -->
+<section id="priority">
+  <div class="sec-head"><span class="sec-num">11</span><h2>적용 순서</h2></div>
+
+  <ol class="prio">
+    <li>
+      <span class="prio-n">01</span>
+      <span class="prio-b"><strong>SIDE_LIDAR_COLS → s0/s4</strong>
+      <span>한 줄. S구간 검출이 0% → 59%가 된다. 다른 모든 수정의 전제.</span></span>
+      <span class="prio-c c-free">재수집 불필요</span>
+    </li>
+    <li>
+      <span class="prio-n">02</span>
+      <span class="prio-b"><strong>시간 상수 10fps 기준 정정</strong>
+      <span>MIN_STOP_FRAMES 5→2, APPROACH_TREND_WINDOW 15→5.</span></span>
+      <span class="prio-c c-free">재수집 불필요</span>
+    </li>
+    <li>
+      <span class="prio-n">03</span>
+      <span class="prio-b"><strong>RECOVERY 구간화</strong>
+      <span>요구사항 §6을 실제로 충족시킨다. 상태머신 루프 교체.</span></span>
+      <span class="prio-c c-free">재수집 불필요</span>
+    </li>
+    <li>
+      <span class="prio-n">04</span>
+      <span class="prio-b"><strong>lane 증거 하한 · 카메라 증거 명시적 비활성화</strong>
+      <span>죽은 신호가 조용히 오탐을 만드는 것을 차단.</span></span>
+      <span class="prio-c c-free">재수집 불필요</span>
+    </li>
+    <li>
+      <span class="prio-n">05</span>
+      <span class="prio-b"><strong>시간 파생 피처 4종 추가 + 모델 입력 확장</strong>
+      <span>STOP↔RECOVERY 구분을 모델이 배울 수 있게 하는 유일한 경로. 모델 재학습 필요.</span></span>
+      <span class="prio-c c-free">재수집 불필요</span>
+    </li>
+    <li>
+      <span class="prio-n">06</span>
+      <span class="prio-b"><strong>mirror 스킵을 프레임 단위로</strong>
+      <span>avoidance 파일의 정상 주행 84%가 증강 기회를 되찾는다.</span></span>
+      <span class="prio-c c-free">재수집 불필요</span>
+    </li>
+    <li>
+      <span class="prio-n">07</span>
+      <span class="prio-b"><strong>IR emitter · visual preset · ROI 중앙값</strong>
+      <span>depth 신뢰도를 정상화. 여기서부터 재수집이 필요하다.</span></span>
+      <span class="prio-c c-recol">재수집 필요</span>
+    </li>
+    <li>
+      <span class="prio-n">08</span>
+      <span class="prio-b"><strong>depth 자유공간 섹터 (depth_c0…c8)</strong>
+      <span>YOLO 클래스에 없는 종이컵을 감지하는 유일한 방법.</span></span>
+      <span class="prio-c c-recol">재수집 필요</span>
+    </li>
+    <li>
+      <span class="prio-n">09</span>
+      <span class="prio-b"><strong>IMU 스트림 (D435i인 경우)</strong>
+      <span>"실제로 멈췄는가"를 물리 측정으로. zero-event 추론 로직 상당수가 불필요해진다.</span></span>
+      <span class="prio-c c-recol">재수집 필요</span>
+    </li>
+  </ol>
+
+  <div class="note">
+    <span class="note-k">먼저 확인해야 할 것</span>
+    <p>
+      <code>rs-enumerate-devices</code>로 D435인지 D435i인지 확정할 것.
+      IMU 유무가 09번의 가부를 가르고, 그에 따라 07–08의 설계도 달라진다.
+    </p>
+  </div>
+</section>
+
+<footer>
+  <p>
+    검증 기반: <code>data/normal_course1.csv</code>(838) · <code>normal_course2.csv</code>(660) ·
+    <code>s_curve_course1.csv</code>(371) · <code>avoidance_course1.csv</code>(371), 총 2,240 프레임.
+    각 수치는 <code>augment/</code> 모듈을 직접 임포트해 재현했다.
+    D435 사양 수치는 공개 데이터시트 기준 근사값이며, Min-Z는 해상도와 disparity shift 설정에 따라
+    달라지므로 실기 측정으로 확인이 필요하다.
+  </p>
+</footer>
+
+</div>

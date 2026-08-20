@@ -26,7 +26,7 @@ from config import (
     LIDAR_DANGER_M, LIDAR_CLEAR_M, LIDAR_RATIO,
     CONTEXT_PAD, MIN_STOP_FRAMES,
     APPROACH_TREND_WINDOW, APPROACH_DROP_M,
-    LANE_VIS_DROP_RATIO,
+    LANE_VIS_DROP_RATIO, LANE_BASELINE_MIN,
     S_CURVE_SIDE_CLOSE_M, S_CURVE_FRONT_OPEN_M,
     S_CURVE_REQUIRED_RATIO, S_CURVE_WINDOW,
     SCENARIO_NORMAL, SCENARIO_NOISE, SCENARIO_AVOIDANCE,
@@ -178,13 +178,21 @@ class ScenarioClassifier:
                 dmin = ev["front_dist"].loc[ctx_idx].min()
                 cam_hit = bool(ev["cam_threat"].loc[ctx_idx].any())
 
-                trend_idx = idx[max(0, local_s - APPROACH_TREND_WINDOW)]
-                approach_drop = ev["front_dist"].loc[trend_idx] - dmin
+                # 윈도우 시작점 "한 프레임" 만 보면 그 프레임이 튀었을 때
+                # 판정 전체가 흔들린다. 구간 중앙값으로 기준선을 잡는다.
+                trend_slice = idx[max(0, local_s - APPROACH_TREND_WINDOW):max(1, local_s)]
+                pre_level = (ev["front_dist"].loc[trend_slice].median()
+                             if len(trend_slice) else dmin)
+                approach_drop = pre_level - dmin
                 is_approaching = approach_drop > APPROACH_DROP_M
 
                 # 차선 증거는 반드시 이벤트 구간 자체의 평균으로 판정
+                # lane 증거는 baseline 대비 상대비율로 판정하는데, S구간에서는
+                # BiSeNet 이 차선을 거의 못 잡아 baseline 자체가 0.003 수준이다
+                # (normal 은 0.86~0.97). 그 상태의 상대비율은 무의미하므로
+                # 최소 신뢰 하한을 넘는 경우에만 증거로 인정한다.
                 lane_hit = False
-                if not pd.isna(base_lane) and base_lane > 0:
+                if not pd.isna(base_lane) and base_lane >= LANE_BASELINE_MIN:
                     lane_mean = ev["lane_sum"].loc[ev_idx].mean()
                     lane_hit = lane_mean < LANE_VIS_DROP_RATIO * base_lane
 
@@ -219,7 +227,13 @@ class ScenarioClassifier:
 
         # ── 프레임 단위 위협 (회피/재출발 판정용) ────────────────────
         front_threat = compute_front_threat(ev, grp, throttle)
+        # 측면(s0/s4)은 절대거리만 사용한다. S구간에서 측면이 상시 근접인
+        # 것은 "좁은 구간을 통과 중"이라는 뜻이지 위협이 아니므로,
+        # 상대비율(LIDAR_RATIO)은 적용하지 않는다.
         side_threat = ev["side_dist"] < LIDAR_DANGER_M
+        # 전방 사선(s1/s3)은 정면과 측면 사이의 사각을 메운다. 비스듬히
+        # 접근하는 장애물은 s2 에도 s0/s4 에도 안 걸릴 수 있다.
+        oblique_threat = ev["oblique_dist"] < LIDAR_DANGER_M
         obstacle_cleared = (~front_threat) & (~ev["cam_threat"])
 
         # ── 재출발 상태머신 ──────────────────────────────────────────
@@ -240,25 +254,32 @@ class ScenarioClassifier:
             # (사람이 "여기서 재출발했다"고 보증했으므로).
             relax_clear = (stype == SCENARIO_RECOVERY)
 
-            awaiting = False
+            # [구간화] breakaway 를 넘은 "한 프레임" 이 아니라, 정지가 끝난
+            # 지점부터 breakaway 를 처음 넘는 지점까지 전체를 RECOVERY 로 본다.
+            # 0 → 0.4 → 0.7 → 0.85 → 0.95 전 구간이 재출발 행동이기 때문이다.
+            awaiting, span_start = False, None
             for i in range(len(idx)):
                 if ss[i]:
-                    awaiting = False
+                    awaiting, span_start = False, None
                     continue
                 if i > 0 and ss[i - 1] and not ss[i]:
-                    awaiting = True
-                if awaiting and thr[i] > MOTOR_DEAD_ZONE_MAX and (clr[i] or relax_clear):
-                    is_recovery.loc[idx[i]] = True
-                    awaiting = False
+                    awaiting, span_start = True, i
+                if awaiting and (clr[i] or relax_clear):
+                    if thr[i] > MOTOR_DEAD_ZONE_MAX:
+                        is_recovery.loc[idx[span_start:i + 1]] = True
+                        awaiting, span_start = False, None
+                    elif i - span_start > 30:      # 3초 내 재출발 없으면 포기
+                        awaiting, span_start = False, None
 
         out["is_recovery"] = is_recovery
+
 
         # ── 비정지 회피 ──────────────────────────────────────────────
         # 스로틀이 살아있는 상태에서 위협을 지나가는 프레임.
         # S구간은 별도 라벨이므로 회피에서 제외한다(둘 다 보호되지만
         # 라벨이 섞이면 behavior cloning이 구분을 못 배운다).
         is_avoidance = (
-            (front_threat | side_threat | ev["cam_threat"])
+            (front_threat | side_threat | oblique_threat | ev["cam_threat"])
             & (throttle >= ZERO_EVENT_THRESH)
             & (~out["is_s_curve"])
         )
@@ -267,7 +288,7 @@ class ScenarioClassifier:
         is_avoidance = is_avoidance | (
             avoid_prior
             & (throttle >= ZERO_EVENT_THRESH)
-            & (front_threat | side_threat | ev["cam_threat"])
+            & (front_threat | side_threat | oblique_threat | ev["cam_threat"])
         )
         out["is_avoidance"] = is_avoidance
 
