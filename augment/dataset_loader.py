@@ -20,7 +20,7 @@ from pathlib import Path
 
 import pandas as pd
 
-from config import KNOWN_SCENARIOS, SCENARIO_FALLBACK
+from config import KNOWN_SCENARIOS, SCENARIO_FALLBACK, IMU_COLS as IMU_FILL_COLS
 
 
 # scenario_type은 s_curve처럼 밑줄을 포함할 수 있으므로 greedy하게 잡고,
@@ -134,6 +134,27 @@ class DatasetLoader:
             # _src_idx: 모든 시계열 연산(rolling/diff/shift/interpolate)이
             # 이 그룹 안에서만 일어나야 파일 경계 오염이 없다.
             # (한 번에 assign — 개별 대입은 DataFrame을 단편화시킨다)
+            # [중요] IMU 컬럼이 없는 파일은 0 으로 채운다.
+            #
+            # 채우지 않고 두면 IMU 가 있는 파일과 concat 될 때 NaN 이 되는데,
+            # NaN 은 두 곳에서 조용히 사고를 낸다.
+            #   1) pandas 에서 NaN == 0.0 은 False 라, sensor_evidence 의
+            #      "전부 0이면 IMU 미탑재" 판정이 반대로 뒤집힌다. 그 결과
+            #      IMU 가 없는 구 파일이 "완전히 정지해 있었다" 로 읽혀
+            #      모든 zero-event 가 진짜 정지로 확정된다.
+            #      (실측 사고: normal_course1 이 noise 185 -> stop 205 로 뒤집힘.
+            #       정면이 4.45m 로 뚫려 있는데도 정지로 분류되었다)
+            #   2) train_planner / saliency 의 dropna() 가 그 행 전체를 지운다.
+            #      (실측: planner_data.csv 3671행 -> 1431행)
+            #
+            # 0 으로 채우면 IMU_ALLZERO_RATIO 판정이 정상 동작해
+            # "이 파일에는 IMU 가 없다" 로 올바르게 인식되고, 행도 살아남는다.
+            for col in IMU_FILL_COLS:
+                if col not in df.columns:
+                    df[col] = 0.0
+                else:
+                    df[col] = df[col].fillna(0.0)
+
             df = df.assign(
                 _src_idx=src_idx,
                 _scenario_type=meta.scenario_type,
