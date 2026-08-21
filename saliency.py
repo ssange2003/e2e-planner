@@ -55,7 +55,10 @@ _HERE = Path(__file__).resolve().parent
 if str(_HERE) not in sys.path:
     sys.path.insert(0, str(_HERE))
 
-from planner_model import PlannerModel, row_to_tensors, GRID_ROWS, GRID_COLS
+from planner_model import (
+    PlannerModel, row_to_tensors,
+    GRID_ROWS, GRID_COLS, FRAME_W, FRAME_H,
+)
 
 BLOCKS = ("objects", "lane", "lidar", "ego")
 
@@ -268,6 +271,126 @@ def report_frame(row, res):
     draw_grid_signed(res["lane"], "세기")
     print("")
     draw_grid_dir(res["lane"])
+
+
+def explain_frame(row, res):
+    """사람이 읽는 문장으로 판단 근거를 설명한다.
+
+    격자 인덱스를 실제 화면 픽셀 좌표로, 섹터 번호를 실제 각도와 거리로
+    되돌려 준다. 숫자표만으로는 "r5c9 가 0.018" 이 무슨 뜻인지 알 수 없고,
+    현장에서 카메라 화면과 대조하려면 픽셀 좌표가 있어야 하기 때문이다.
+    """
+    s0, t0 = res["pred"]
+    ts = float(row["target_steering"])
+    tt = float(row["target_throttle"])
+    fid = int(row["frame_id"]) if "frame_id" in row.index else -1
+
+    cw = FRAME_W // GRID_COLS      # 848 / 12 = 70 px
+    chh = FRAME_H // GRID_ROWS     # 480 /  6 = 80 px
+
+    print("=" * 72)
+    print("  frame " + str(fid) + " 판단 설명")
+    print("=" * 72)
+
+    # ── 센서가 무엇을 봤는가 ──────────────────────────────────────
+    print("  [센서 관측]")
+    for i, (nm, a1, a2) in enumerate(LIDAR_SECTORS):
+        dist = float(row["lidar_s" + str(i)])
+        if dist < 0.45:
+            state = "위협"
+        elif dist < 0.80:
+            state = "근접"
+        elif dist < 2.0:
+            state = "여유"
+        else:
+            state = "열림"
+        print("      " + nm + " " + format(dist, "5.2f") + "m"
+              + "  [" + format(a1, "+5.1f") + "°~" + format(a2, "+5.1f") + "°]"
+              + "  " + state)
+
+    lane_cols = ["lane_r" + str(r) + "c" + str(c)
+                 for r in range(GRID_ROWS) for c in range(GRID_COLS)]
+    lane_vals = np.array([float(row[k]) for k in lane_cols]).reshape(
+        GRID_ROWS, GRID_COLS)
+    lane_sum = float(lane_vals.sum())
+    if lane_sum < 1e-6:
+        print("      차선     검출 없음 (BiSeNet 출력이 전부 0)")
+    else:
+        col_w = lane_vals.sum(axis=0)
+        com = float((col_w * np.arange(GRID_COLS)).sum() / max(col_w.sum(), 1e-9))
+        px = int((com + 0.5) * cw)
+        side = "왼쪽" if com < 5.0 else ("오른쪽" if com > 6.0 else "중앙")
+        print("      차선     합 " + format(lane_sum, ".3f")
+              + "  무게중심 열 " + format(com, ".1f") + "/11"
+              + "  (화면 x≈" + str(px) + "px, " + side + ")")
+
+    # ── 모델이 무엇을 결정했는가 ─────────────────────────────────
+    print("")
+    print("  [모델 결정]")
+    turn = "왼쪽" if s0 > 0.15 else ("오른쪽" if s0 < -0.15 else "거의 직진")
+    move = "정지" if t0 < 0.1 else ("서행" if t0 < 0.6 else "주행")
+    print("      steer " + format(s0, "+.3f") + "  -> " + turn
+          + "        (정답 " + format(ts, "+.3f") + ")")
+    print("      thr   " + format(t0, "+.3f") + "  -> " + move
+          + "        (정답 " + format(tt, "+.3f") + ")")
+
+    # ── 왜 그렇게 결정했는가 ─────────────────────────────────────
+    print("")
+    print("  [판단 근거]")
+    g = res["group"]
+    order = sorted(BLOCKS, key=lambda b: -abs(g[b][0]))
+    top = order[0]
+    tot = sum(abs(g[b][0]) for b in BLOCKS) or 1e-12
+    print("      조향은 " + top + " 가 주도 ("
+          + format(abs(g[top][0]) / tot * 100, ".0f") + "% 기여, "
+          + format(g[top][0], "+.4f") + ")")
+    for b in order[1:]:
+        if abs(g[b][0]) < 1e-4:
+            print("      " + b + " 는 이 프레임에서 출력에 영향 없음")
+        else:
+            print("      " + b + " " + format(g[b][0], "+.4f")
+                  + " (" + format(abs(g[b][0]) / tot * 100, ".0f") + "%)")
+
+    # 라이다 최대 기여 섹터
+    li = int(np.argmax([abs(v[0]) for v in res["lidar"]]))
+    lv = res["lidar"][li][0]
+    nm, a1, a2 = LIDAR_SECTORS[li]
+    push = "왼쪽" if lv > 0 else "오른쪽"
+    print("      라이다 중에서는 " + nm.strip()
+          + " (" + format(a1, "+.0f") + "°~" + format(a2, "+.0f") + "°, "
+          + format(float(row["lidar_s" + str(li)]), ".2f") + "m) 가 "
+          + push + "으로 " + format(lv, "+.4f"))
+
+    # 차선 격자 최대 기여 칸 -> 픽셀
+    grid = res["lane"]
+    r, c = np.unravel_index(int(np.argmax(np.abs(grid))), grid.shape)
+    v = float(grid[r, c])
+    push = "왼쪽" if v > 0 else "오른쪽"
+    depth = "먼 곳" if r <= 1 else ("중간" if r <= 3 else "가까운 곳")
+    lr = "좌" if c <= 3 else ("우" if c >= 8 else "중앙")
+    print("      차선 격자에서는 r" + str(r) + "c" + str(c)
+          + " (" + depth + "/" + lr + ", 화면 x " + str(c * cw) + "~"
+          + str((c + 1) * cw) + "px, y " + str(r * chh) + "~"
+          + str((r + 1) * chh) + "px) 가 " + push + "으로 "
+          + format(v, "+.4f"))
+
+    # ── 경고 ────────────────────────────────────────────────────
+    notes = []
+    dead = [b for b in BLOCKS if abs(g[b][0]) < 1e-4 and abs(g[b][1]) < 1e-4]
+    if dead:
+        notes.append("입력 " + ", ".join(dead) + " 이(가) 출력에 전혀 기여하지 않음")
+    if abs(g["ego"][1]) > abs(g["lane"][1]) + abs(g["lidar"][1]):
+        notes.append("스로틀을 센서가 아니라 직전 스로틀(ego)이 주로 결정함 "
+                     "— 관성 복사이지 판단이 아님")
+    front = float(row["lidar_s2"])
+    if front < 0.45 and t0 > 0.6:
+        notes.append("정면 " + format(front, ".2f") + "m 로 막혔는데 스로틀 "
+                     + format(t0, ".2f") + " 유지 — 정지를 배우지 못한 신호")
+    if notes:
+        print("")
+        print("  [경고]")
+        for n in notes:
+            print("      * " + n)
 
 
 def report_summary(agg):
@@ -502,6 +625,8 @@ def main():
     ap.add_argument("--limit", type=int, default=200,
                     help="요약 시 표본 프레임 수 (기본 200)")
     ap.add_argument("--summary", action="store_true")
+    ap.add_argument("--explain", action="store_true",
+                    help="사람이 읽는 문장으로 판단 근거 설명 (--frame 과 함께)")
     ap.add_argument("--html", type=Path, default=None,
                     help="HTML 리포트 저장 경로 (브라우저로 열어보기)")
     args = ap.parse_args()
@@ -539,6 +664,9 @@ def main():
             sys.exit(1)
         row = sub.iloc[0]
         res = analyse_frame(model, row)
+        if args.explain:
+            explain_frame(row, res)
+            print("")
         report_frame(row, res)
         if args.html:
             write_html(
