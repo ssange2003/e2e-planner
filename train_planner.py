@@ -28,6 +28,7 @@ Usage
 
 import sys
 import argparse
+import random
 import numpy as np
 import pandas as pd
 from pathlib import Path
@@ -66,7 +67,29 @@ class PlannerDataset(Dataset):
       target   : ( 2,)  float32  [steering, throttle_norm]
     """
 
-    def __init__(self, csv_path: Path):
+    def __init__(self, csv_path: Path, ego_dropout: float = 0.0,
+                 lidar_clip: float = 0.0):
+        # 💡 [추가] 두 실험 옵션. 기본값이 꺼짐이라 미지정 시 기존 동작과 동일하다.
+        #
+        # ego_dropout: 학습 중 확률적으로 ego 를 0 으로 만든다.
+        #   [근거] 폐루프 주행에서 ego 는 모델 자기 출력이 되돌아온 값이라
+        #   오차가 누적된다. 반면 학습 때 ego 는 항상 정답이라
+        #   corr(ego_throttle, target_throttle)=+0.78 인 지름길이 된다.
+        #   차폐 측정에서 ego 가 스로틀 기여의 67%(0.1868)를 차지했고,
+        #   S구간에서는 라이다(0.2308)의 1.9배(0.4368)였다.
+        #   일정 비율로 ego 를 가리면 그 프레임은 센서로만 풀어야 하므로
+        #   모델이 두 경로를 모두 갖추게 된다.
+        #
+        # lidar_clip: 라이다 거리를 상한으로 자른다(0 이면 비활성).
+        #   [근거] 라이다는 정규화 없이 raw 미터로 들어가고, 전체의 27.4%가
+        #   5.0 에 포화돼 있다. 그런데 5.0 은 "무반사"와 "5m 밖"을 겸해
+        #   의미가 모호하고, 개활 테스트장에서만 나오는 값이다.
+        #   실측: 코스별 평균 |좌우 비대칭| 1.704 → 2.0m 클립 시 0.010 으로
+        #   테스트장 지문이 소거되며, S구간 구조(+0.03/+0.05)와
+        #   근거리(<0.45m) 프레임은 100% 보존된다.
+        self.ego_dropout = float(ego_dropout)
+        self.lidar_clip = float(lidar_clip)
+
         df = pd.read_csv(csv_path)
 
         # Validate schema
@@ -135,10 +158,16 @@ class PlannerDataset(Dataset):
         # Ego features: (EGO_FEATURES,)
         ego = torch.tensor([float(row["ego_steering"]),
                             float(row["ego_throttle"])], dtype=torch.float32)
+        # 💡 [추가] ego dropout — 매 에폭 다르게 가려야 하므로 학습 단계에서만 가능
+        if self.ego_dropout > 0.0 and random.random() < self.ego_dropout:
+            ego = torch.zeros_like(ego)
                             
         # 💡 [추가된 부분: 라이다 센서 데이터 추출 및 텐서화]
         # CSV 파일의 각 행에서 lidar_s0 ~ lidar_s4 컬럼 값을 읽어와 5차원 PyTorch 텐서로 변환합니다.
         lidar_vals = [float(row[f"lidar_s{i}"]) for i in range(5)]
+        # 💡 [추가] 라이다 상한 클리핑
+        if self.lidar_clip > 0.0:
+            lidar_vals = [min(v, self.lidar_clip) for v in lidar_vals]
         lidar = torch.tensor(lidar_vals, dtype=torch.float32)
 
         # Scenario token
@@ -163,6 +192,8 @@ def train(
     batch_size:  int          = 64,
     save_path:   Path         = SAVE_PATH,
     finetune_from: Path | None = None,
+    ego_dropout: float = 0.0,
+    lidar_clip: float = 0.0,
 ) -> None:
 
     # ── Device ────────────────────────────────────────────────────────────────
@@ -192,7 +223,7 @@ def train(
             print(f"[ERROR] No dataset found. Run collect_data_planner.py first.")
             sys.exit(1)
 
-    dataset = PlannerDataset(csv_path)
+    dataset = PlannerDataset(csv_path, ego_dropout=ego_dropout, lidar_clip=lidar_clip)
 
     if len(dataset) == 0:
         print("[ERROR] Dataset is empty.")
@@ -392,6 +423,12 @@ if __name__ == "__main__":
                         help='Batch size (default: 64)')
     parser.add_argument('--output',       type=Path,  default=SAVE_PATH,
                         help=f'Model output path (default: {SAVE_PATH})')
+    parser.add_argument('--ego-dropout', type=float, default=0.0,
+                        help='학습 중 ego 를 0 으로 만들 확률 (0=비활성). '
+                             '폐루프에서 ego 자기출력 되먹임 의존을 끊는다')
+    parser.add_argument('--lidar-clip', type=float, default=0.0,
+                        help='라이다 거리 상한 [m] (0=비활성). 2.0 권장 — '
+                             '테스트장 지문(좌우 비대칭)을 소거한다')
     parser.add_argument('--finetune',     type=Path,  default=None,
                         help='Start from an existing checkpoint instead of random init '
                              '(e.g. --finetune planner_model.pth). Use a lower LR, e.g. --lr 5e-5')
@@ -404,4 +441,6 @@ if __name__ == "__main__":
         batch_size    = args.batch_size,
         save_path     = args.output,
         finetune_from = args.finetune,
+        ego_dropout   = args.ego_dropout,
+        lidar_clip    = args.lidar_clip,
     )
