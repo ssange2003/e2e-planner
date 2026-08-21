@@ -426,7 +426,7 @@ if __name__ == "__main__":
     parser.add_argument('--ego-dropout', type=float, default=0.0,
                         help='학습 중 ego 를 0 으로 만들 확률 (0=비활성). '
                              '폐루프에서 ego 자기출력 되먹임 의존을 끊는다')
-    parser.add_argument('--lidar-clip', type=float, default=0.0,
+    parser.add_argument('--lidar-clip', type=float, default=LIDAR_CLIP_M,
                         help='라이다 거리 상한 [m] (0=비활성). 2.0 권장 — '
                              '테스트장 지문(좌우 비대칭)을 소거한다')
     parser.add_argument('--finetune',     type=Path,  default=None,

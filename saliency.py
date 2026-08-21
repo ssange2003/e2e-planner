@@ -61,8 +61,12 @@ if str(_HERE) not in sys.path:
 
 from planner_model import (
     PlannerModel, row_to_tensors,
-    GRID_ROWS, GRID_COLS, FRAME_W, FRAME_H,
+    GRID_ROWS, GRID_COLS, FRAME_W, FRAME_H, LIDAR_CLIP_M,
 )
+
+# 분석 시 적용할 라이다 클리핑. 체크포인트가 학습된 값과 반드시 같아야 한다.
+# 클리핑 도입 이전에 학습된 모델을 분석할 때는 --no-clip 으로 0 을 준다.
+CLIP = LIDAR_CLIP_M
 
 BLOCKS = ("objects", "lane", "lidar", "ego")
 
@@ -108,7 +112,7 @@ def occlude(model, tensors, which, index=None):
 def analyse_frame(model, row):
     """한 프레임의 귀속을 계산한다. 모든 값은 (원래출력 - 차폐후출력) 이라
     양수면 그 입력이 출력을 양(+, 왼쪽) 방향으로 밀고 있었다는 뜻이다."""
-    tensors = row_to_tensors(row)
+    tensors = row_to_tensors(row, lidar_clip=CLIP)
     s0, t0 = predict(model, tensors)
 
     res = {"pred": (s0, t0), "group": {}, "lidar": [], "lane": None}
@@ -779,6 +783,8 @@ def main():
     ap.add_argument("--limit", type=int, default=200,
                     help="요약 시 표본 프레임 수 (기본 200)")
     ap.add_argument("--summary", action="store_true")
+    ap.add_argument("--no-clip", action="store_true",
+                    help="라이다 클리핑 없이 분석 (클리핑 도입 전 체크포인트용)")
     ap.add_argument("--by-course", action="store_true",
                     help="data/*_course*.csv 를 코스별로 따로 분석")
     ap.add_argument("--data-dir", type=Path, default=Path("data"),
@@ -792,6 +798,12 @@ def main():
     if not args.model.exists():
         print("모델 파일 없음: " + str(args.model))
         sys.exit(1)
+
+    global CLIP
+    if args.no_clip:
+        CLIP = 0.0
+    print("[clip] lidar_clip = " + format(CLIP, ".1f") + "m"
+          + ("  (체크포인트 학습값과 일치해야 함)" if CLIP else "  (비활성)"))
 
     model = PlannerModel()
     try:

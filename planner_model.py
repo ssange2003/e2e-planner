@@ -87,6 +87,29 @@ SCENARIO_NAMES = {
 # Normalisation constants  (shared between collection and inference)
 MAX_DIST_M     = 5.0    # clip distances beyond this to 1.0
 
+# 💡 [추가된 부분: 라이다 상한 클리핑]
+# 라이다는 다른 입력과 달리 정규화 없이 raw 미터로 들어가고, 전체 값의 27.4%가
+# 정확히 5.0 에 포화돼 있다. 그런데 collect_data_planner.get_min_dist 에서
+# 5.0 은 "반사가 아예 없음"과 "가장 가까운 것이 5m 밖"을 겸해 의미가 모호하다.
+# 게다가 이 값은 개활 테스트장에서만 나온다 — 사각 박스형 대회장에서는 어느
+# 방향이든 벽이 반사를 주므로 5.0 이 거의 사라진다.
+#
+# [실측 근거] S구간을 제외한 6개 코스 전부 왼쪽 2~3.5m 에 구조물이 있고
+# 오른쪽은 비어 있다(테스트장 왼쪽 벽). 모델이 이 좌우 비대칭을 주행 규칙이
+# 아니라 세상의 법칙으로 학습한다.
+#   코스별 평균 |좌우 비대칭|   원본 1.704  ->  2.0m 클립 0.010
+#   S구간 좌우 대칭            +0.03/+0.05  그대로 (무손상)
+#   근거리(<0.45m) 프레임      보존율 100%
+#
+# 2.0m 를 고른 이유: 1.2 / 1.5 / 2.0 이 지문 제거 효과가 모두 0.010 으로
+# 동일하므로, 같은 효과라면 접근 정보가 가장 많이 남는 값이 맞다.
+# 판단이 실제로 일어나는 거리는 avoidance p75=1.51m, s_curve p75=1.23m 라
+# 2.0m 는 그 위에 있어 접근 과정을 온전히 담는다.
+#
+# [주의] 이 값을 바꾸면 입력 분포가 바뀐다. 다른 값으로 학습된 체크포인트는
+# 에러 없이 조용히 어긋나므로 반드시 재학습해야 한다.
+LIDAR_CLIP_M   = 2.0
+
 # 💡 [수정된 부분: 최대 스로틀 상숫값 조정]
 # 원본 코드의 0.35에서 실제 수집 및 주행 캘리브레이션에 맞춘 0.383으로 미세 조정되었습니다.(add modify 0.36)
 MAX_THROTTLE   = 0.41 
@@ -466,7 +489,7 @@ def csv_columns_ext() -> list[str]:
     return csv_columns() + IMU_COLUMNS
 
 
-def row_to_tensors(row, device=None, lidar_sectors=None):
+def row_to_tensors(row, device=None, lidar_sectors=None, lidar_clip=LIDAR_CLIP_M):
     """
     Convert a single pandas Series / dict row from the structured CSV (or live feed) into
     model-ready tensors, including the 5-dim LiDAR tensor.
@@ -487,6 +510,12 @@ def row_to_tensors(row, device=None, lidar_sectors=None):
         lidar_vals = [float(v) for v in lidar_sectors]
     else:
         lidar_vals = [float(row[f"lidar_s{i}"]) for i in range(5)]
+
+    # 💡 [추가] 상한 클리핑. 학습(train_planner)과 반드시 같은 값이어야 한다.
+    # lidar_clip=0 으로 부르면 비활성 — 클리핑 없이 학습된 구 체크포인트를
+    # 분석할 때 쓴다.
+    if lidar_clip and lidar_clip > 0:
+        lidar_vals = [min(v, lidar_clip) for v in lidar_vals]
 
     ego_vals  = [float(row["ego_steering"]), float(row["ego_throttle"])]
     scenario  = int(row["scenario"])
