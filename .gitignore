@@ -1,3 +1,8 @@
 __pycache___artifact.html
 _sal*.json
 _train_log.txt
+
+__pycache__/
+workspace.zip
+*(1)*
+_artifact.html
