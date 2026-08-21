@@ -273,6 +273,159 @@ def report_frame(row, res):
     draw_grid_dir(res["lane"])
 
 
+def by_course(model, data_dir, limit):
+    """코스(CSV) 별로 따로 귀속을 재고 비교한다.
+
+    코스마다 센서 환경이 완전히 다르다 — 개활 코스는 정면 라이다 baseline 이
+    4.6m 인데 종이컵 협로는 0.8m 다. 전체를 한 덩어리로 평균 내면 그 차이가
+    상쇄돼 "모델이 어느 코스에서 무엇을 보는가" 가 보이지 않는다.
+    파일 단위로 나눠야 협로에서는 라이다를, 개활에서는 차선을 보는지
+    같은 질문에 답할 수 있다.
+    """
+    data_dir = Path(data_dir)
+    files = sorted(data_dir.glob("*_course*.csv"))
+    out = []
+    for f in files:
+        df = pd.read_csv(f).dropna().reset_index(drop=True)
+        if df.empty:
+            continue
+        agg = aggregate(model, df, limit)
+        if agg is None:
+            continue
+        # 이 코스의 센서 성격도 함께 기록해 둔다 (해석에 필요)
+        side = df[["lidar_s0", "lidar_s4"]].min(axis=1)
+        lane_cols = ["lane_r" + str(r) + "c" + str(c)
+                     for r in range(GRID_ROWS) for c in range(GRID_COLS)]
+        agg["name"] = f.stem
+        agg["front_med"] = float(df["lidar_s2"].median())
+        agg["side_med"] = float(side.median())
+        agg["lane_med"] = float(df[lane_cols].sum(axis=1).median())
+        agg["rows"] = len(df)
+        out.append(agg)
+    return out
+
+
+def report_by_course(courses):
+    print("=" * 78)
+    print("  코스별 귀속 비교   (조향 |기여도|)")
+    print("=" * 78)
+    print("  코스마다 센서 환경이 달라 전체 평균으로는 보이지 않는 차이를 본다.")
+    print("")
+    print("  " + "코스".ljust(22) + "행수   정면m  측면m  차선   "
+          + "lane   lidar  ego    obj")
+    print("  " + "-" * 74)
+    for a in courses:
+        g = a["group_abs"]
+        print("  " + a["name"].ljust(22)
+              + str(a["rows"]).rjust(5) + "  "
+              + format(a["front_med"], "5.2f") + "  "
+              + format(a["side_med"], "5.2f") + "  "
+              + format(a["lane_med"], "5.3f") + "  "
+              + format(g["lane"][0], ".4f") + " "
+              + format(g["lidar"][0], ".4f") + " "
+              + format(g["ego"][0], ".4f") + " "
+              + format(g["objects"][0], ".4f"))
+
+    print("")
+    print("  라이다 섹터별 |기여도|")
+    print("  " + "코스".ljust(22)
+          + "".join(nm.strip().ljust(9) for nm, _, _ in LIDAR_SECTORS))
+    print("  " + "-" * 74)
+    for a in courses:
+        print("  " + a["name"].ljust(22)
+              + "".join(format(v, ".4f").ljust(9) for v in a["lidar_abs"]))
+
+    for a in courses:
+        print("")
+        print("  " + a["name"] + "  —  lane 기여 방향")
+        draw_grid_dir(a["lane_sgn"])
+
+
+def write_html_courses(path, courses, note):
+    """코스별 섹션을 세로로 쌓은 리포트. 각 섹션에 부채꼴 + 격자."""
+    secs = []
+    for a in courses:
+        g = a["group_sgn"]
+        gmx = max(abs(g[b][0]) for b in BLOCKS) or 1e-12
+        lsg = list(a["lidar_sgn"])
+        lmx = max(abs(v) for v in lsg) or 1e-12
+        rows = "".join(
+            _bar_row(b, g[b][0], gmx, "thr " + format(g[b][1], "+.3f"))
+            for b in BLOCKS
+        )
+        secs.append(
+            '<section class="course"><h3>' + _html.escape(a["name"]) + "</h3>"
+            + '<p class="cmeta">' + str(a["rows"]) + " rows &nbsp;·&nbsp; 정면 "
+            + format(a["front_med"], ".2f") + "m &nbsp;·&nbsp; 측면 "
+            + format(a["side_med"], ".2f") + "m &nbsp;·&nbsp; 차선 "
+            + format(a["lane_med"], ".3f") + "</p>"
+            + '<div class="split">'
+            + '<div class="col"><h4>블록</h4>' + rows + "</div>"
+            + '<div class="col"><h4>라이다 (실제 각도)</h4>'
+            + '<svg viewBox="0 0 400 240" class="fan">'
+            + _lidar_fan(lsg, lmx) + "</svg></div>"
+            + '<div class="col"><h4>차선 격자</h4>'
+            + _grid_svg(a["lane_sgn"]) + "</div>"
+            + "</div></section>"
+        )
+
+    doc = """<!doctype html><html lang="ko"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>코스별 귀속 비교</title><style>
+:root{--bg:#f2f5f7;--fg:#0f151c;--mut:#5f6a75;--edge:#d5dbe1;--hair:#e6eaee;
+--card:#fff;--left:#0d7d8c;--right:#bd5636}
+@media(prefers-color-scheme:dark){:root:not([data-theme="light"]){
+--bg:#10151a;--fg:#e4e9ee;--mut:#8b96a2;--edge:#28313a;--hair:#1e262e;
+--card:#161c23;--left:#2ba7b8;--right:#e0764f}}
+:root[data-theme="dark"]{--bg:#10151a;--fg:#e4e9ee;--mut:#8b96a2;
+--edge:#28313a;--hair:#1e262e;--card:#161c23;--left:#2ba7b8;--right:#e0764f}
+*{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--fg);
+font:400 15px/1.6 "IBM Plex Sans",ui-sans-serif,system-ui,sans-serif}
+.wrap{max-width:1080px;margin:0 auto;padding:36px 20px 80px}
+h1{font:700 30px/1.15 "IBM Plex Sans Condensed","IBM Plex Sans",sans-serif;
+margin:0 0 8px}
+.lede{color:var(--mut);margin:0 0 8px;max-width:62ch;font-size:14.5px}
+.course{border-top:1px solid var(--edge);padding-top:22px;margin-top:34px}
+h3{font:600 17px/1.2 "IBM Plex Mono",monospace;margin:0 0 4px}
+.cmeta{color:var(--mut);font:400 12.5px "IBM Plex Mono",monospace;margin:0 0 16px}
+h4{font:600 10.5px/1 "IBM Plex Mono",monospace;letter-spacing:.1em;
+text-transform:uppercase;color:var(--mut);margin:0 0 10px}
+.split{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr)
+minmax(0,1fr);gap:26px;align-items:start}
+@media(max-width:900px){.split{grid-template-columns:1fr}}
+.row{display:flex;align-items:center;gap:8px;margin:5px 0}
+.nm{width:62px;font:12px ui-monospace,monospace;color:var(--mut);flex:none}
+.track{position:relative;flex:1;height:17px;background:var(--card);
+border:1px solid var(--edge);border-radius:3px;overflow:hidden}
+.track::after{content:"";position:absolute;left:50%;top:0;bottom:0;width:1px;
+background:var(--edge)}
+.track i{position:absolute;top:0;bottom:0;display:block}
+.val{width:60px;text-align:right;font:12px ui-monospace,monospace;flex:none}
+.extra{width:74px;font:11px ui-monospace,monospace;color:var(--mut);flex:none}
+.fan{width:100%;height:auto;display:block;overflow:visible}
+.wl{font:500 11px ui-monospace,monospace;fill:var(--fg);text-anchor:middle}
+.wv{font:400 10px ui-monospace,monospace;fill:var(--mut);text-anchor:middle}
+.rings{fill:none;stroke:var(--hair);stroke-width:1}
+.axisline{stroke:var(--edge);stroke-width:1;stroke-dasharray:3 4}
+.grid{width:100%;height:auto;display:block}
+.key{display:flex;gap:18px;font:400 12.5px ui-monospace,monospace;
+color:var(--mut);margin:14px 0 0}
+.sw{width:11px;height:11px;border-radius:2px;display:inline-block;
+vertical-align:-1px;margin-right:5px}
+footer{margin-top:48px;padding-top:14px;border-top:1px solid var(--edge);
+color:var(--mut);font-size:12.5px}
+</style></head><body><div class="wrap">
+<h1>코스별 귀속 비교</h1>
+<p class="lede">코스마다 센서 환경이 다르다 — 개활 코스는 정면 라이다 baseline 이 4.6m 인데
+종이컵 협로는 0.8m 다. 전체를 한 덩어리로 평균 내면 그 차이가 상쇄되므로 파일 단위로 나눠 잰다.</p>
+<div class="key"><span><i class="sw" style="background:var(--left)"></i>왼쪽으로 밈</span>
+<span><i class="sw" style="background:var(--right)"></i>오른쪽으로 밈</span></div>
+""" + "".join(secs) + """
+<footer>""" + _html.escape(note) + """</footer>
+</div></body></html>"""
+    Path(path).write_text(doc, encoding="utf-8")
+
+
 def explain_frame(row, res):
     """사람이 읽는 문장으로 판단 근거를 설명한다.
 
@@ -625,6 +778,10 @@ def main():
     ap.add_argument("--limit", type=int, default=200,
                     help="요약 시 표본 프레임 수 (기본 200)")
     ap.add_argument("--summary", action="store_true")
+    ap.add_argument("--by-course", action="store_true",
+                    help="data/*_course*.csv 를 코스별로 따로 분석")
+    ap.add_argument("--data-dir", type=Path, default=Path("data"),
+                    help="--by-course 가 훑을 디렉토리")
     ap.add_argument("--explain", action="store_true",
                     help="사람이 읽는 문장으로 판단 근거 설명 (--frame 과 함께)")
     ap.add_argument("--html", type=Path, default=None,
@@ -653,6 +810,22 @@ def main():
     print("[load] " + args.model.name + " / " + args.csv.name
           + "   (" + str(len(df)) + " rows)")
     print("")
+
+    if args.by_course:
+        courses = by_course(model, args.data_dir, args.limit)
+        if not courses:
+            print("코스 CSV 를 찾지 못했습니다: " + str(args.data_dir))
+            sys.exit(1)
+        report_by_course(courses)
+        if args.html:
+            write_html_courses(
+                args.html, courses,
+                "모델 " + args.model.name + " / " + str(args.data_dir)
+                + " / 코스당 최대 " + str(args.limit) + " 프레임 표본",
+            )
+            print("")
+            print("[html] " + str(args.html))
+        return
 
     if args.frame is not None:
         sub = df[df["frame_id"] == args.frame]
