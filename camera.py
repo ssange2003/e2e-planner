@@ -127,6 +127,24 @@ def _dump_device_info(want_w=None, want_h=None, want_fps=None):
                 print("         ※ 이 모델에는 IMU 가 없습니다(D435 등).")
 
 
+def _has_motion_module() -> bool:
+    """💡 [추가됨] 연결된 장치에 Motion Module 센서가 노출되어 있는지 확인.
+
+    없으면 IMU 파이프라인 기동을 아예 시도하지 않습니다. 실패하는 config 를
+    다섯 번 시도하면 매 실행마다 수 초가 낭비되고 로그도 지저분해집니다.
+    (Jetson L4T 커널에는 hid-sensor-* 모듈이 빌드되어 있지 않아 D455 라도
+     Motion Module 이 노출되지 않습니다 — 이 경우가 정상 경로가 됩니다.)
+    """
+    try:
+        for d in rs.context().devices:
+            for sensor in d.sensors:
+                if "Motion" in sensor.get_info(rs.camera_info.name):
+                    return True
+    except Exception:
+        pass
+    return False
+
+
 class Camera:
     """RealSense D4xx camera with optional aligned depth stream."""
 
@@ -186,6 +204,13 @@ class Camera:
         #   - 메인 루프는 기존과 완전히 동일하게 동작하고(블로킹 지점 불변),
         #   - IMU 가 실패해도 주행은 그대로 계속됩니다(우아한 성능 저하).
         # 메인 루프가 지불하는 비용은 공유 변수에서 float 를 읽는 것뿐입니다.
+        # 💡 [추가됨] Motion Module 이 없으면 조용히 건너뜁니다.
+        # 매 실행마다 실패 시도 5회를 반복하지 않기 위함입니다.
+        if enable_imu and not _has_motion_module():
+            self._enable_imu = False
+            print("[Camera] IMU 없음 (Motion Module 미노출) — IMU 없이 진행합니다")
+            enable_imu = False
+
         if enable_imu:
             # 💡 [수정됨] 모션 스트림 설정을 단계적으로 완화하며 재시도합니다.
             # "Couldn't resolve requests" 는 요청한 (포맷, 레이트) 조합을
