@@ -156,19 +156,48 @@ class Camera:
         #   - IMU 가 실패해도 주행은 그대로 계속됩니다(우아한 성능 저하).
         # 메인 루프가 지불하는 비용은 공유 변수에서 float 를 읽는 것뿐입니다.
         if enable_imu:
-            try:
-                self._imu_pipeline = rs.pipeline()
-                icfg = rs.config()
-                icfg.enable_stream(rs.stream.accel, rs.format.motion_xyz32f, 250)
-                icfg.enable_stream(rs.stream.gyro,  rs.format.motion_xyz32f, 200)
-                self._imu_pipeline.start(icfg, self._imu_callback)
-                print("[Camera] IMU stream ON  (accel 250Hz / gyro 200Hz, 별도 파이프라인)")
-            except Exception as exc:
-                # D435(무印) 처럼 IMU 가 없는 모델이거나 펌웨어가 거부한 경우.
+            # 💡 [수정됨] 모션 스트림 설정을 단계적으로 완화하며 재시도합니다.
+            # "Couldn't resolve requests" 는 요청한 (포맷, 레이트) 조합을
+            # 장치가 제공하지 못할 때 나옵니다. D435i 라도 펌웨어/SDK 버전에
+            # 따라 지원 레이트가 다르므로, 명시 레이트 -> 다른 레이트 ->
+            # 레이트 미지정(SDK 기본값) 순으로 낮춰가며 시도합니다.
+            attempts = [
+                ("accel 250Hz / gyro 200Hz",
+                 [(rs.stream.accel, rs.format.motion_xyz32f, 250),
+                  (rs.stream.gyro,  rs.format.motion_xyz32f, 200)]),
+                ("accel 63Hz / gyro 400Hz",
+                 [(rs.stream.accel, rs.format.motion_xyz32f, 63),
+                  (rs.stream.gyro,  rs.format.motion_xyz32f, 400)]),
+                ("레이트 미지정 (SDK 기본값)",
+                 [(rs.stream.accel,), (rs.stream.gyro,)]),
+            ]
+
+            last_exc = None
+            for label, streams in attempts:
+                try:
+                    pipe = rs.pipeline()
+                    icfg = rs.config()
+                    for spec in streams:
+                        icfg.enable_stream(*spec)
+                    pipe.start(icfg, self._imu_callback)
+                    self._imu_pipeline = pipe
+                    print(f"[Camera] IMU stream ON  ({label}, 별도 파이프라인)")
+                    break
+                except Exception as exc:
+                    last_exc = exc
+                    try:
+                        pipe.stop()
+                    except Exception:
+                        pass
+                    print(f"[Camera] IMU 시도 실패 [{label}]: {exc}")
+
+            if self._imu_pipeline is None:
+                # D435(무印) 처럼 Motion Module 이 아예 없는 경우가 대부분입니다.
                 # 여기서 죽으면 주행 자체가 불가능해지므로 반드시 흡수합니다.
-                self._imu_pipeline = None
                 self._enable_imu = False
-                print(f"[Camera] IMU 사용 불가 — IMU 없이 계속합니다 ({exc})")
+                print(f"[Camera] IMU 사용 불가 — IMU 없이 계속합니다 ({last_exc})")
+                print("[Camera] 장치에 Motion Module 이 있는지 확인하세요:")
+                _dump_device_info()
 
         # Warm up — discard the first few frames while exposure settles
         if self.pipeline is not None:
