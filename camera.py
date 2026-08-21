@@ -25,7 +25,7 @@ import pyrealsense2 as rs
 # ─────────────────────────────────────────────────────────────────────────────
 # 💡 [추가된 부분: D435i IMU 축 정의]
 # ─────────────────────────────────────────────────────────────────────────────
-# D435i 의 IMU 좌표계는 depth 센서와 정렬되어 있습니다(librealsense 기준):
+# D455 / D435i 의 IMU 좌표계는 depth 센서와 정렬되어 있습니다(librealsense 기준):
 #     X = 오른쪽,  Y = 아래,  Z = 전방(광축)
 # 따라서 카메라를 정립(正立)으로 전방을 향해 장착했다면
 #     중력은 +Y 에 약 +9.81 로 실리고,
@@ -76,6 +76,19 @@ def _dump_device_info(want_w=None, want_h=None, want_fps=None):
             print(f"         sensor: {sname}")
             if "Motion" in sname:
                 has_imu = True
+                # 💡 [추가됨] 이 장치가 실제로 지원하는 모션 레이트를 출력합니다.
+                # 모델마다 다르므로(D455 100/200, D435i 63/250) 실패 시
+                # 여기서 바로 원인을 확인할 수 있습니다.
+                rates = {}
+                for prof in sensor.get_stream_profiles():
+                    try:
+                        st = prof.stream_type()
+                        if st in (rs.stream.accel, rs.stream.gyro):
+                            rates.setdefault(str(st).split(".")[-1], set()).add(prof.fps())
+                    except Exception:
+                        pass
+                for k in sorted(rates):
+                    print(f"           지원 레이트 {k}: {sorted(rates[k])} Hz")
             if want_w and "RGB" in sname:
                 modes = set()
                 for prof in sensor.get_stream_profiles():
@@ -161,15 +174,27 @@ class Camera:
             # 장치가 제공하지 못할 때 나옵니다. D435i 라도 펌웨어/SDK 버전에
             # 따라 지원 레이트가 다르므로, 명시 레이트 -> 다른 레이트 ->
             # 레이트 미지정(SDK 기본값) 순으로 낮춰가며 시도합니다.
+            # [모델별 지원 레이트]  같은 D4xx 라도 IMU 칩과 지원 레이트가 다릅니다.
+            #   D455  (BMI055) : accel 100 / 200 Hz,  gyro 200 / 400 Hz
+            #   D435i (BMI055) : accel  63 / 250 Hz,  gyro 200 / 400 Hz
+            # 그래서 D435i 값(250/63)만 시도하면 D455 에서 전부 실패하며
+            # "Couldn't resolve requests" 가 납니다. 가장 관대한 설정을
+            # 마지막에 두어 어떤 모델이든 결국 열리도록 합니다.
             attempts = [
-                ("accel 250Hz / gyro 200Hz",
+                ("레이트 미지정 (장치 기본값)",
+                 [(rs.stream.accel,), (rs.stream.gyro,)]),
+                ("accel 200Hz / gyro 200Hz  (D455)",
+                 [(rs.stream.accel, rs.format.motion_xyz32f, 200),
+                  (rs.stream.gyro,  rs.format.motion_xyz32f, 200)]),
+                ("accel 100Hz / gyro 200Hz  (D455)",
+                 [(rs.stream.accel, rs.format.motion_xyz32f, 100),
+                  (rs.stream.gyro,  rs.format.motion_xyz32f, 200)]),
+                ("accel 250Hz / gyro 200Hz  (D435i)",
                  [(rs.stream.accel, rs.format.motion_xyz32f, 250),
                   (rs.stream.gyro,  rs.format.motion_xyz32f, 200)]),
-                ("accel 63Hz / gyro 400Hz",
+                ("accel 63Hz / gyro 400Hz   (D435i)",
                  [(rs.stream.accel, rs.format.motion_xyz32f, 63),
                   (rs.stream.gyro,  rs.format.motion_xyz32f, 400)]),
-                ("레이트 미지정 (SDK 기본값)",
-                 [(rs.stream.accel,), (rs.stream.gyro,)]),
             ]
 
             last_exc = None
