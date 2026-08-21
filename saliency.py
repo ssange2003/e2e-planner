@@ -36,10 +36,14 @@ steering = atan2(y, x) 이므로 목표점이 왼쪽이면 양수가 된다.
 실측 corr(조향, 차선 무게중심) = -0.16 도 이 부호와 일치한다.
 
 사용법
-    python3 saliency.py --frame 500
-    python3 saliency.py --summary
-    python3 saliency.py --frame 500 --html report.html      # 브라우저로 보기
-    python3 saliency.py --summary --html report.html
+    python3 saliency.py --frame 500                    한 프레임 귀속
+    python3 saliency.py --frame 500 --explain          픽셀·각도 단위 자연어 설명
+    python3 saliency.py --summary                      전체 평균
+    python3 saliency.py --by-course                    코스(CSV)별로 나눠 비교
+    python3 saliency.py --by-course --html report.html 브라우저용 리포트
+
+    --html 은 모든 모드에서 쓸 수 있다. 외부 의존성 없는 단일 파일이라
+    그대로 열린다.
 """
 
 import argparse
@@ -201,9 +205,6 @@ def draw_grid_signed(grid, label):
             lvl = min(int(abs(v) / mx * (len(lo) - 1)), len(lo) - 1)
             cells += lo[lvl]
         print("      " + tag + " |" + cells + "|")
-    # 부호를 따로 한 줄 더 — 어느 칸이 어느 방향인지
-    for r in range(GRID_ROWS):
-        pass
     print("      최대 |기여| " + format(mx, ".4f"))
 
 
