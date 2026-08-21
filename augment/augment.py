@@ -17,10 +17,20 @@ augment.py — 파이프라인 오케스트레이션 + CLI
 """
 
 import argparse
+import sys
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
+
+# 💡 [추가됨] PYTHONPATH 없이도 실행되도록 경로를 스스로 잡습니다.
+# config.py 는 상위 폴더의 planner_model.py 를 임포트하는데,
+# python augment/augment.py 로 실행하면 파이썬이 augment/ 만 검색 경로에
+# 넣기 때문에 매번 PYTHONPATH=. 를 붙여야 했습니다.
+_HERE = Path(__file__).resolve().parent
+for _p in (str(_HERE), str(_HERE.parent)):
+    if _p not in sys.path:
+        sys.path.insert(0, _p)
 
 from config import INTERNAL_COLS, KNOWN_SCENARIOS, csv_columns
 from dataset_loader import DatasetLoader, discover_files
