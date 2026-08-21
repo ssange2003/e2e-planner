@@ -106,7 +106,25 @@ def _dump_device_info(want_w=None, want_h=None, want_fps=None):
                     print(f"         ★ 요청 모드 {want} 미지원.")
                     near = sorted(m for m in modes if m[2] == want_fps)[:6]
                     print(f"         가능한 모드 예: {near}")
-        print(f"         IMU(Motion Module): {'있음' if has_imu else '★ 없음 (D435i 아님)'}")
+        # 💡 [수정됨] Motion Module 이 안 보이는 원인은 모델만이 아닙니다.
+        # D455 / D435i 는 IMU 를 하드웨어로 반드시 탑재하므로, 이 모델에서
+        # Motion Module 이 없다면 그것은 리눅스 쪽 문제입니다. D4xx 의 IMU 는
+        # UVC 가 아니라 HID(iio) 서브시스템으로 올라오기 때문에
+        # hid_sensor_* 커널 모듈이 없으면 librealsense 가 장치를 보지 못합니다.
+        if has_imu:
+            print("         IMU(Motion Module): 있음")
+        else:
+            print("         IMU(Motion Module): ★ 없음")
+            if any(k in name for k in ("D455", "D435I", "D435i", "D456", "D457")):
+                print(f"         ※ {name} 는 IMU 를 하드웨어로 탑재한 모델입니다.")
+                print("           센서가 안 보이는 것은 리눅스가 HID(iio) 장치를")
+                print("           노출하지 못하고 있다는 뜻입니다. 확인 순서:")
+                print("             ls /sys/bus/iio/devices/          # accel_3d/gyro_3d 존재?")
+                print("             lsmod | grep hid_sensor           # 모듈 적재 여부")
+                print("             sudo modprobe hid-sensor-accel-3d hid-sensor-gyro-3d")
+                print("           그래도 없으면 librealsense 커널 패치가 필요합니다.")
+            else:
+                print("         ※ 이 모델에는 IMU 가 없습니다(D435 등).")
 
 
 class Camera:
@@ -345,9 +363,9 @@ if __name__ == "__main__":
     cam = Camera(enable_color=False, enable_imu=True)
     if not cam._enable_imu:
         print("")
-        print("★ IMU 스트림을 열지 못했습니다. 위 진단 출력에서")
-        print("  'IMU(Motion Module): 있음' 인지 먼저 확인하세요.")
-        print("  없다면 D435i 가 아니라 D435 이며, IMU 기반 판정은 사용할 수 없습니다.")
+        print("★ IMU 스트림을 열지 못했습니다.")
+        print("  위 진단의 'IMU(Motion Module)' 줄과 그 아래 안내를 확인하세요.")
+        print("  D455/D435i 인데 없다고 나오면 하드웨어가 아니라 리눅스 HID 설정 문제입니다.")
         sys.exit(1)
     print("")
     print("5초간 IMU 를 읽습니다. 차를 움직이지 마세요...")
