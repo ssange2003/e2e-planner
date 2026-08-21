@@ -76,15 +76,38 @@ def parse_filename(path) -> ScenarioMetadata:
 
 
 def discover_files(input_dir) -> list:
-    """디렉토리에서 CSV를 자동 탐색한다(--input-dir 모드)."""
+    """디렉토리에서 CSV를 자동 탐색한다(--input-dir 모드).
+
+    [중요] 규약에 맞는 파일만 받아들인다.
+
+    이전에는 제외 목록(planner_data.csv, augmented_data.csv)에 없는 파일을
+    전부 입력으로 삼았는데, 그 방식은 새로운 산출물이 하나 생길 때마다
+    조용히 뚫린다. 실제로 augmented_data4.csv / augmented_test.csv /
+    planner_data.bak*.csv 가 입력으로 딸려 들어가 이미 증강된 데이터가
+    재증강되는 사고가 났다(전체 26799행 중 23128행이 오염).
+
+    그래서 "제외 목록" 대신 "허용 규약"으로 뒤집는다. 자동 탐색은
+    {scenario}_course{N}.csv 형식이면서 scenario 가 KNOWN_SCENARIOS 에
+    있는 파일만 가져온다. 규약 밖 파일을 일부러 쓰고 싶으면 --inputs 로
+    명시하면 되므로 유연성도 잃지 않는다.
+    """
     input_dir = Path(input_dir)
     if not input_dir.is_dir():
         raise NotADirectoryError(f"입력 디렉토리를 찾을 수 없습니다: {input_dir}")
-    # 파이프라인 산출물은 입력으로 다시 잡히면 안 되므로 제외
-    exclude = {"planner_data.csv", "augmented_data.csv"}
-    files = sorted(
-        p for p in input_dir.glob("*.csv") if p.name not in exclude
-    )
+
+    files, skipped = [], []
+    for path in sorted(input_dir.glob("*.csv")):
+        match = _FILENAME_RE.match(path.stem)
+        if match and match.group("scenario").lower() in KNOWN_SCENARIOS:
+            files.append(path)
+        else:
+            skipped.append(path.name)
+
+    if skipped:
+        print(f"  [SKIP] 규약에 맞지 않아 건너뜀 ({len(skipped)}개): "
+              f"{', '.join(skipped[:6])}" + (" ..." if len(skipped) > 6 else ""))
+        print(f"         자동 탐색은 {{scenario}}_course{{N}}.csv 형식만 받습니다.")
+        print(f"         꼭 포함하려면 --inputs 로 직접 지정하세요.")
     return files
 
 
