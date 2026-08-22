@@ -154,6 +154,50 @@ IMU_COLUMNS = [
 ]
 IMU_FEATURES = len(IMU_COLUMNS)
 
+# 💡 [추가된 부분: corridor — 차폭 기준 통행 가능 거리]
+#
+# [왜 필요한가]
+# 라이다 5섹터는 각 호(arc) 전체의 최솟값 하나라 "몇 도 방향에서 온 값인지"가
+# 소멸한다. 그래서 같은 s1 = 0.50m 가
+#     11도 방향이면  lateral 0.095m  -> 내 폭 안, 부딪힘   (정지해야 함)
+#     25도 방향이면  lateral 0.211m  -> 옆,       비켜감   (회피하면 됨)
+# 로 정반대 의미인데 구분이 불가능하다.
+#
+# [실측 근거] 상황별 5섹터 프로파일 거리(작을수록 구분 불가):
+#     avoidance vs stop      0.72 m   <- 정반대 행동인데 제일 안 갈림
+#     s_curve   vs avoidance 0.72 m
+#     stop      vs recovery  0.81 m
+#     normal    vs 나머지    2.2~3.7 m  (개활지만 잘 갈린다)
+# 학습시키려는 네 행동이 전부 0.7~0.8m 안에 엉켜 있다.
+#
+# [해결] lateral = d * sin(theta) 를 원본 스캔에서 직접 계산해
+# "내 차 폭 안"과 "옆"을 물리적으로 가른다. 그러면
+#     front_clear  이대로 직진하면 몇 m 가서 부딪히나
+#     left_gap     왼쪽으로 한 차폭 비키면 뭐가 있나
+#     right_gap    오른쪽으로 비키면 뭐가 있나
+# 세 숫자로 다섯 상황이 서로 다른 패턴이 된다.
+#
+# [중요] IMU_COLUMNS 와 같은 패턴으로 csv_columns() 밖에 둔다. 기존 CSV 8개는
+# 계속 읽히고, 학습 검증은 부분집합 검사라 통과하며, 모델 입력은 컬럼명을
+# 직접 지정해 만들므로 이 컬럼을 추가해도 모델 구조 변경도 재학습도 필요없다.
+#
+# [미검증] 이 값이 실제로 조향 설명력을 올릴지는 수집 전에 확인할 수 없다.
+# 현재 5섹터의 조향 설명력은 R^2 = 0.241 (s_curve_course1) 이고, 각도 소멸이
+# 병목이라는 것이 가설이다. 대안 가설로 "게임패드 이산 입력({0, +-0.9}이 84%)
+# 이라 애초에 예측 상한이 낮다" 도 배제되지 않았다. 수집 후 R^2 재측정으로
+# 판별한다.
+LIDAR_EXTRA_COLUMNS = [
+    "lidar_front_clear",   # 경로 안(|lateral| < CAR_HALF_W) 최소 거리 [m]
+    "lidar_left_gap",      # 왼쪽 여유대 최소 거리 [m]
+    "lidar_right_gap",     # 오른쪽 여유대 최소 거리 [m]
+]
+LIDAR_EXTRA_FEATURES = len(LIDAR_EXTRA_COLUMNS)
+
+# [실측] 차폭 188mm. 판정 반폭은 물리 반폭 94mm 에 조향 시 스윕 여유를 더해 100mm.
+CAR_HALF_W   = 0.100
+# [추론] 여유대 폭 = 한 차폭. "비켜서 통과할 공간이 있는가" 를 묻는 값이다.
+CAR_SIDE_GAP = 0.188
+
 FRAME_W        = 848    # must match camera config — RealSense supported: 848x480, 640x480, 640x360
 FRAME_H        = 480
 N_YOLO_CLASSES = 80     # COCO classes; override if using custom model
@@ -507,8 +551,12 @@ def csv_columns() -> list[str]:
 # 수집(collect_data_planner.py)은 이 확장 스키마로 헤더를 쓰고,
 # 학습/증강은 기존 csv_columns() 로 검증하므로 양쪽 모두 호환됩니다.
 def csv_columns_ext() -> list[str]:
-    """기본 스키마 + IMU 파생 컬럼. 수집 단계에서만 사용합니다."""
-    return csv_columns() + IMU_COLUMNS
+    """기본 스키마 + IMU + corridor 파생 컬럼. 수집 단계에서만 사용합니다.
+
+    학습/증강은 csv_columns() 로 검증하므로(부분집합 검사) 여기에 컬럼을
+    추가해도 기존 CSV 와 신규 CSV 를 모두 읽을 수 있습니다.
+    """
+    return csv_columns() + IMU_COLUMNS + LIDAR_EXTRA_COLUMNS
 
 
 def row_to_tensors(row, device=None, lidar_sectors=None, lidar_clip=LIDAR_CLIP_M):

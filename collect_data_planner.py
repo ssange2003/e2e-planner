@@ -108,6 +108,7 @@ from planner_model import (
     SCENARIO_NAMES,
     MAX_THROTTLE,
     csv_columns_ext, IMU_COLUMNS,   # 💡 [추가됨] IMU 확장 스키마
+    LIDAR_EXTRA_COLUMNS, CAR_HALF_W, CAR_SIDE_GAP,  # 💡 [추가됨] corridor
     FRAME_W, FRAME_H,
 )
 
@@ -305,7 +306,8 @@ def _init_csv(csv_path: Path):
 # 'lidar_feats' 파라미터가 추가되었고, 해당 5구역 데이터를 CSV의 올바른 위치(스키마 순서)에 기록하도록 수정되었습니다.
 def _save_row(writer, fh, frame_id: int, obj_feats: list, lane_feats: list,
               ego_feats: list, lidar_feats: list, scenario: int, steering: float,
-              throttle: float, imu_feats: list = None):
+              throttle: float, imu_feats: list = None,
+              corridor_feats: list = None):
     """Write one structured row to the CSV.
 
     💡 [추가된 부분: imu_feats]
@@ -331,6 +333,11 @@ def _save_row(writer, fh, frame_id: int, obj_feats: list, lane_feats: list,
     # 💡 [추가됨] IMU 파생값 3개를 스키마 맨 뒤에 기록
     imu = imu_feats if imu_feats is not None else [0.0, 0.0, 0.0]
     row.extend(f"{float(v):.5f}" for v in imu)
+
+    # 💡 [추가됨] corridor 3개. None 이면 MAX_DIST_M 로 채워 "열림" 을 뜻하게 한다.
+    # 0 으로 채우면 "코앞이 막힘" 이 되어 정반대 의미가 되므로 절대 0 을 쓰지 않는다.
+    cor = corridor_feats if corridor_feats is not None else [MAX_DIST_M] * 3
+    row.extend(f"{float(v):.5f}" for v in cor)
 
     writer.writerow(row)
     fh.flush()
@@ -414,6 +421,70 @@ def process_lidar_to_5_sectors(raw_scan):
     s4 = get_min_dist(833, 916)  # 우측
 
     return [s0, s1, s2, s3, s4]
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 💡 [추가된 부분: corridor — 차폭 기준 통행 가능 거리]
+# ─────────────────────────────────────────────────────────────────────────────
+# [왜 여기서 계산하는가]
+# 원본 1000점이 살아 있는 유일한 지점이다. 5섹터로 압축되고 나면 각 호(arc)의
+# 최솟값 하나만 남아 "몇 도 방향에서 온 값인지"가 소멸하며, 그 뒤로는 어떤
+# 방법으로도 복원할 수 없다.
+#
+# [왜 필요한가]  같은 s1 = 0.50m 가
+#     11도 방향이면  lateral 0.095m  ->  내 폭 안, 부딪힘  (정지해야 함)
+#     25도 방향이면  lateral 0.211m  ->  옆,      비켜감   (회피하면 됨)
+# 으로 정반대 의미인데 5섹터로는 구분이 불가능하다.
+#
+# [실측] 상황별 5섹터 프로파일 거리 (작을수록 구분 불가):
+#     avoidance vs stop      0.72 m   <- 정반대 행동인데 제일 안 갈림
+#     s_curve   vs avoidance 0.72 m
+#     stop      vs recovery  0.81 m
+#     normal    vs 나머지    2.2~3.7 m  (개활지만 잘 갈린다)
+#
+# [연산량] 실측 34.6us. 수집 예산 100ms 의 0.03%, 추론 예산 54.6ms 의 0.06%.
+# sin/cos 는 상수 배열로 1회만 계산하므로 프레임당 비용은 곱셈과 min 뿐이다.
+# 참고로 15섹터 분할은 80.6us 로 오히려 더 비싸면서 각도 문제를 못 푼다.
+#
+# [주의] 이 함수는 수집과 추론이 반드시 같은 것을 써야 한다. 정의를 두 벌
+# 두면 학습 때 본 값과 주행 때 들어가는 값이 조용히 어긋난다.
+# (이 저장소에 이미 그런 사례가 있다 — train_planner.py 는 row_to_tensors 를
+#  import 하고도 쓰지 않고 텐서를 직접 만든다.)
+
+_CORRIDOR_IDX = np.concatenate([np.arange(833, 1000), np.arange(0, 167)])
+# 인덱스 -> 각도(rad). 1000점 / 360도 = 0.36도/idx, 양수가 왼쪽(spline_expert 규약).
+_CORRIDOR_ANG = np.deg2rad(_CORRIDOR_IDX * 0.36)
+_CORRIDOR_ANG = np.where(_CORRIDOR_ANG > np.pi, _CORRIDOR_ANG - 2 * np.pi, _CORRIDOR_ANG)
+_CORRIDOR_SIN = np.sin(_CORRIDOR_ANG)
+_CORRIDOR_COS = np.cos(_CORRIDOR_ANG)
+
+
+def compute_corridor(raw_scan):
+    """원본 스캔에서 [front_clear, left_gap, right_gap] 를 계산한다.
+
+        front_clear  내 차 폭 안에서 가장 가까운 것까지  = 직진하면 몇 m 뒤 충돌
+        left_gap     왼쪽 한 차폭 띠에서 가장 가까운 것  = 왼쪽으로 비키면 뭐가 있나
+        right_gap    오른쪽 같은 것
+
+    유효한 점이 없으면 MAX_DIST_M(5.0) 을 반환한다. 0 이 아니라 5.0 인 이유는
+    0 이 "거리 0m = 코앞에 벽" 을 뜻해 정반대 의미가 되기 때문이다.
+    """
+    scan = np.asarray(raw_scan, dtype=float)
+    if scan.size < 1000:
+        return [MAX_DIST_M, MAX_DIST_M, MAX_DIST_M]
+
+    d = scan[_CORRIDOR_IDX]
+    ok = np.isfinite(d) & (d > 0.0) & (_CORRIDOR_COS > 0.0)   # 전방 반구만
+    lat = d * _CORRIDOR_SIN                                    # 양수 = 왼쪽
+
+    in_path = ok & (np.abs(lat) < CAR_HALF_W)
+    left_band = ok & (lat >= CAR_HALF_W) & (lat < CAR_HALF_W + CAR_SIDE_GAP)
+    right_band = ok & (lat <= -CAR_HALF_W) & (lat > -(CAR_HALF_W + CAR_SIDE_GAP))
+
+    def _nearest(mask):
+        return float(min(MAX_DIST_M, d[mask].min())) if mask.any() else MAX_DIST_M
+
+    return [_nearest(in_path), _nearest(left_band), _nearest(right_band)]
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Main
@@ -618,6 +689,8 @@ def main(web_port: int = 8082, scenario: int = SCENARIO_LANE_FOLLOW, out_csv: st
             # 원본 코드에는 없는 라이다 연산이 프레임마다 동작하여 데이터를 수집합니다.
             raw_lidar_array = lidar.get_raw_scan()
             processed_lidar_feats = process_lidar_to_5_sectors(raw_lidar_array)
+            # 💡 [추가됨] 원본 스캔이 살아 있는 이 지점에서만 계산 가능 (34.6us)
+            corridor_feats = compute_corridor(raw_lidar_array)
 
             # 💡 [추가됨] 확장형 아키텍처(전문가 모델) 기반 알고리즘 자율 연산
             # 사용자가 선택한 시나리오가 6번(스플라인) 등 매핑된 자율주행 모듈일 경우,
@@ -740,6 +813,7 @@ def main(web_port: int = 8082, scenario: int = SCENARIO_LANE_FOLLOW, out_csv: st
                     # read_imu() 는 공유 변수 조회 + 표준편차 1회라 비용이
                     # 사실상 0 입니다(수집 예산 100ms 대비 무시 가능).
                     imu_feats  = list(camera.read_imu()),
+                    corridor_feats = corridor_feats,
                 )
                 frame_id    += 1
                 saved_count += 1

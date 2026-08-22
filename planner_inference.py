@@ -466,6 +466,28 @@ def main(
                 # 💡 [핵심 1번 수정] get_sectors() 대신 get_raw_scan()으로 원본을 받아 5구역으로 나눔
                 raw_lidar_array = lidar.get_raw_scan()
                 lidar_feats = process_lidar_to_5_sectors(raw_lidar_array)
+
+                # ─────────────────────────────────────────────────────────
+                # 💡 [추가 예정 / 아직 비활성] corridor 3개
+                # ─────────────────────────────────────────────────────────
+                # 지금은 모델이 이 값을 입력으로 받지 않으므로 계산하지 않는다.
+                # 쓰지 않는 값을 매 프레임 계산하는 것은 낭비이고, 모델 입력에
+                # 넣는 단계(LIDAR_FEATURES 5 -> 8)와 함께 켜야 학습과 추론이
+                # 어긋나지 않는다.
+                #
+                # 활성화 조건: collect_data_planner 로 corridor 컬럼이 든
+                # 데이터를 수집하고, 그 데이터로 모델을 재학습한 뒤.
+                #
+                # 활성화 방법: 아래 두 줄의 주석을 풀고, row_to_tensors 가
+                # 8차원 lidar 텐서를 만들도록 함께 수정한다. 정의는 반드시
+                # collect_data_planner.compute_corridor 를 import 해서 쓴다
+                # — 여기에 다시 구현하면 수집과 추론이 조용히 어긋난다.
+                #
+                # from collect_data_planner import compute_corridor
+                # corridor_feats = compute_corridor(raw_lidar_array)   # 34.6us
+                #
+                # [연산량] 34.6us = 추론 예산(54.6ms)의 0.06%. 모델 forward
+                # 자체가 405us 이므로 그 8% 수준이다.
                 
                 objects_t, lane_t, lidar_t, ego_t = extract_features(
                     boxes=boxes, distances=distances,
