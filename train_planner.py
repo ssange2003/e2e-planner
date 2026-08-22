@@ -44,6 +44,7 @@ from planner_model import (
     N_MAX_OBJECTS, OBJ_FEATURES, LANE_FEATURES, EGO_FEATURES,
     GRID_ROWS, GRID_COLS,
     N_SCENARIOS, MAX_THROTTLE,
+    LIDAR_CLIP_M,          # 💡 [추가] 라이다 상한 클리핑 — 추론과 같은 상수를 공유
 )
 
 SCRIPT_DIR  = Path(__file__).resolve().parent
