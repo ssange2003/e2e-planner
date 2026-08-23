@@ -12,3 +12,8 @@ experiments/
 _cmp.json
 _sweep.json
 _report.html
+
+# 증강 산출물 (재생성 가능)
+raw/augmented_new.csv
+raw/planner_data.csv
+insta.zip
