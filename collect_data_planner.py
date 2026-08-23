@@ -109,6 +109,7 @@ from planner_model import (
     MAX_THROTTLE,
     csv_columns_ext, IMU_COLUMNS,   # 💡 [추가됨] IMU 확장 스키마
     LIDAR_EXTRA_COLUMNS, CAR_HALF_W, CAR_SIDE_GAP,  # 💡 [추가됨] corridor
+    MAX_DIST_M,   # 💡 [수정] compute_corridor 가 쓰는데 import 가 빠져 있었다
     FRAME_W, FRAME_H,
 )
 
