@@ -161,7 +161,28 @@ class PlannerDataset(Dataset):
                             float(row["ego_throttle"])], dtype=torch.float32)
         # 💡 [추가] ego dropout — 매 에폭 다르게 가려야 하므로 학습 단계에서만 가능
         if self.ego_dropout > 0.0 and random.random() < self.ego_dropout:
-            ego = torch.zeros_like(ego)
+            # 💡 [변경 2026-08-23] ego 전체 차폐 → 스로틀(ego[1])만 차폐.
+            #   [삭제] ego = torch.zeros_like(ego)
+            #
+            #   [근거 1] 두 채널의 성격이 다르다. 원본 8코스 3,671행 실측:
+            #     corr(ego_throttle, target_throttle) = 0.8778  ← 지름길
+            #     corr(ego_steering, target_steering) = 0.6816  ← 시간 연속성
+            #   진단된 폐루프는 스로틀 쪽이다(planner_inference.py:571,
+            #   ego 스로틀 귀속 60.8%). 조향 되먹임(:570)은 오히려 저역통과로
+            #   작동해 서보 채터를 억제하고 있었다.
+            #
+            #   [근거 2] 전체 차폐한 m_d045(p=0.45) 실측
+            #   (avoidance_course1 371행, 목표 조향 크기로 분할):
+            #     직진   |t|<0.1  n=239  MAE 0.0974 → 0.2087  (+114%)  ← 사행
+            #     급조향 |t|>0.6  n=121  MAE 0.1148 → 0.0971  ( -15%)  ← 개선
+            #     프레임간 급변(>0.2)     67회 → 83회 (+24%)
+            #     |조향| 평균 0.339 → 0.421 (목표 0.304, +38% 과조향)
+            #   즉 회피는 좋아지고 직진이 무너졌다. 손실이 전부 직진에서 났다.
+            #
+            #   [영향 범위] ego_dropout 기본값이 0.0 이라 미지정 시 기존과 동일.
+            #   스키마·추론·기존 체크포인트 전부 무손상. 수정 파일 1개.
+            ego = ego.clone()
+            ego[1] = 0.0
                             
         # 💡 [추가된 부분: 라이다 센서 데이터 추출 및 텐서화]
         # CSV 파일의 각 행에서 lidar_s0 ~ lidar_s4 컬럼 값을 읽어와 5차원 PyTorch 텐서로 변환합니다.
