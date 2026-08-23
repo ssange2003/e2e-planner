@@ -105,11 +105,44 @@ class PlannerDataset(Dataset):
         if len(df) < before:
             print(f"[data] Dropped {before - len(df)} rows with NaN values")
 
-        # Drop rows where both ego and target throttle are ~0 (startup frames before motion)
+        # 💡 [변경 2026-08-23] 값 조건 전체 삭제 → 세션 선두 연속 구간만 삭제.
+        #
+        #   [삭제] df = df[~((df["ego_throttle"].abs() < 0.05)
+        #                    & (df["target_throttle"].abs() < 0.05))]
+        #
+        #   [근거 1 · 원작자 의도] 이 필터는 upstream 커밋 85a36bb
+        #   (smwkbgmn, 2026-04-13) 가 넣은 것이고 원 주석이 범위를 명시했다.
+        #     "Drop startup frames ... These occur at the beginning of each
+        #      collection session before the vehicle gets up to speed.
+        #      ... creates a stuck feedback loop at inference startup."
+        #   즉 대상은 '세션 선두'이고 목적은 '출발 시점'의 루프였다.
+        #   그런데 구현에는 위치 개념이 없어서 주행 중 정지까지 다 걸렸다.
+        #
+        #   [근거 2 · 실측] 원본 8코스 3,671행
+        #     원작자 의도(세션 선두)   77행 ( 2.1%)
+        #     현재 구현(값 조건)      836행 (22.8%)  ← 11배 과잉
+        #   그 836행의 정체:
+        #     noise 617(73.8%) / normal 105 / s_curve 63 / stop 51(6.1%)
+        #   전체 stop 69개 중 51개(74%)를 여기서 잃고 있었다.
+        #
+        #   [근거 3 · 중복 방어] 원작자는 같은 커밋에서 추론 쪽도 고쳤다.
+        #     planner_inference.py:346  prev_throttle = 0.0 -> MAX_THROTTLE
+        #   출발 루프는 그 warm-start 가 이미 막는다. 학습 필터는 중복이고,
+        #   둘 중 부작용이 큰 쪽이다.
+        #
+        #   [근거 4 · 충돌 해소] 바로 아래 :115 hard-negative 는 포크가
+        #   추가한 것으로 (target_throttle < 0.1) 행을 3배 증폭하려 한다.
+        #   이 삭제가 먼저 실행돼 증폭기가 빈 집합에 발화하고 있었다.
+        #   선두 한정으로 좁히면 두 의도가 동시에 성립한다.
+        #
+        #   [안전] 진짜 글리치(noise 617행)는 augment/augmentation.py 가
+        #   프레임 라벨로 먼저 제거한다. 여기서 또 지울 필요가 없다.
+        #   증강 CSV 기준 선두 연속은 24행뿐이라 실질 삭제량은 거의 0이다.
         before = len(df)
-        df = df[~((df["ego_throttle"].abs() < 0.05) & (df["target_throttle"].abs() < 0.05))].reset_index(drop=True)
+        _startup = (df["ego_throttle"].abs() < 0.05) & (df["target_throttle"].abs() < 0.05)
+        df = df.iloc[int(_startup.cumprod().sum()):].reset_index(drop=True)
         if len(df) < before:
-            print(f"[data] Dropped {before - len(df)} startup rows (ego_thr<0.1 & target_thr<0.1)")
+            print(f"[data] Dropped {before - len(df)} leading startup rows")
 
         # ── Zero-Cost Hard Negative Injection ──────────────────────────────
         hard_mask = (df["target_steering"].abs() > 0.3) | (df["target_throttle"] < 0.1)

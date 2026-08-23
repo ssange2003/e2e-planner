@@ -174,7 +174,27 @@ class Augmentor:
         excluded = file_scenario.isin(SCENARIOS_EXCLUDED_FROM_TRAINING)
         n_excluded_files = int(excluded.sum())
 
-        keep = ~excluded
+        # 💡 [추가 2026-08-23] 프레임 라벨이 noise 인 행도 제외한다.
+        #   [근거 1] 바로 위 주석이 "센서 판정으로 노이즈 zero-event인 프레임"
+        #   을 제외한다고 이미 약속하는데 코드는 파일 단위만 걸렀다.
+        #   SCENARIO_NOISE 가 :29 에서 import 되고 이 파일 어디에서도
+        #   쓰이지 않는 것이 배선이 빠졌다는 흔적이다.
+        #
+        #   [근거 2 · 실측] 원본 3,671행의 프레임 라벨 분포
+        #     normal 1784 / noise 690 / s_curve 633 / avoidance 411
+        #     recovery 84 / stop 69
+        #   noise 690개 중 noise_course1.csv(340행)만 파일 단위로 걸러지고
+        #   나머지 ~350개 — 정상 코스에 섞인 게임패드 글리치 — 는 그대로
+        #   학습에 들어갔다. 이 파이프라인을 만든 목적이 바로 그 350개다.
+        #
+        #   [영향] 이걸 걸러야 train_planner.py:110 의 뭉뚱그린 삭제를
+        #   원작자 의도대로 좁힐 수 있다. 지금은 :110 이 대신 지우면서
+        #   진짜 stop 51개(전체 69개의 74%)까지 같이 지우고 있다.
+        frame_noise = scenario_labels == SCENARIO_NOISE
+        n_excluded_frames = int((frame_noise & ~excluded).sum())
+
+        # [변경] keep = ~excluded   ← 파일 단위만
+        keep = ~(excluded | frame_noise)
         df_keep = df.loc[keep].reset_index(drop=True)
         labels_keep = scenario_labels.loc[keep].reset_index(drop=True)
 
@@ -186,6 +206,7 @@ class Augmentor:
         if df_keep.empty:
             self.last_stats = {
                 "excluded_noise_rows": n_excluded_files,
+                "excluded_noise_frames": n_excluded_frames,   # 💡 [추가]
                 "input_rows": 0, "output_rows": 0,
                 "mirror_skipped": 0, "scale_skipped": 0,
             }
@@ -234,6 +255,7 @@ class Augmentor:
 
         self.last_stats = {
             "excluded_noise_rows": n_excluded_files,
+            "excluded_noise_frames": n_excluded_frames,   # 💡 [추가]
             "input_rows": len(df_keep),
             "output_rows": len(aug_df),
             "mirror_skipped": n_mirror_skipped,
