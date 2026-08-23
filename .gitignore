@@ -6,3 +6,9 @@ __pycache__/
 workspace.zip
 *(1)*
 _artifact.html
+
+# 실험 산출물 (배포에 불필요)
+experiments/
+_cmp.json
+_sweep.json
+_report.html

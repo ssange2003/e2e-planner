@@ -493,7 +493,8 @@ def compute_corridor(raw_scan):
 # 💡 [수정됨] 메인 함수 시그니처 변경
 # 사용자가 스크립트 실행 시 --out 옵션을 통해 저장할 CSV 파일명을 마음대로 지정할 수 있도록
 # out_csv 파라미터가 함수 인자로 추가되었습니다.
-def main(web_port: int = 8082, scenario: int = SCENARIO_LANE_FOLLOW, out_csv: str = "planner_data.csv"):
+def main(web_port: int = 8082, scenario: int = SCENARIO_LANE_FOLLOW, out_csv: str = "planner_data.csv",
+         save_scan: bool = False):
     global _yolo_running  # 전역 변수 참조 선언 명시
 
     # 전달받은 파일명 인자를 바탕으로 최종 저장 경로 동적 할당
@@ -595,6 +596,26 @@ def main(web_port: int = 8082, scenario: int = SCENARIO_LANE_FOLLOW, out_csv: st
 
     # ── CSV ──────────────────────────────────────────────────────────────────
     csv_fh, csv_writer = _init_csv(PLANNER_CSV)
+
+    # [추가 2026-08-23] --save-scan : 원본 1000점 스캔을 CSV 와 1:1 로 보존.
+    #
+    #   [근거] process_lidar_to_5_sectors(:397) 의 min 연산자가 호 안의
+    #   각도를 지운다. 그래서 CSV 에 남는 lidar_s0~s4 는 5개 전부 "거리"
+    #   이고 각도가 하나도 없다. 조향은 각도를 정하는 문제인데 입력에
+    #   각도가 없으니, 5섹터의 조향 설명력이 비선형 교차검증 R^2 0.081
+    #   에 그친다 (원본 8코스 3,671행 실측).
+    #
+    #   [왜 원본을 남기나] 어떤 5개가 최적인지 (bearing / argmin 각도 /
+    #   corridor / 섹터 9,15,36개) 는 원본 스캔이 있어야 비교할 수 있다.
+    #   지금은 min 5개만 남아 단 하나의 실험도 불가능하고, 형식을 바꿀
+    #   때마다 차를 다시 몰아야 한다. 스캔을 남기면 전부 오프라인이 된다.
+    #
+    #   [비용] 1000 x float32 x 10fps x 10분 = 24 MB.
+    #   CSV 스키마 불변. 기본값 꺼짐이라 플래그 없으면 기존 동작 그대로.
+    scan_sink = [] if save_scan else None
+    if save_scan:
+        _sp = PLANNER_CSV.with_name("scan_" + PLANNER_CSV.stem + ".npy")
+        print(f"  Raw scan  : ON  -> {_sp.name}")
 
     # ── Signal handling ───────────────────────────────────────────────────────
     running = True
@@ -815,6 +836,12 @@ def main(web_port: int = 8082, scenario: int = SCENARIO_LANE_FOLLOW, out_csv: st
                     imu_feats  = list(camera.read_imu()),
                     corridor_feats = corridor_feats,
                 )
+                # [추가] CSV 한 행이 실제로 써진 이 자리에서만 append 한다.
+                # 루프 앞쪽(:690)에서 하면 recording OFF 구간과 rate-limit
+                # 로 버려진 프레임까지 들어가 CSV 와 행이 어긋난다.
+                if scan_sink is not None:
+                    scan_sink.append(np.asarray(raw_lidar_array, dtype=np.float32))
+
                 frame_id    += 1
                 saved_count += 1
 
@@ -886,6 +913,15 @@ def main(web_port: int = 8082, scenario: int = SCENARIO_LANE_FOLLOW, out_csv: st
             time.sleep(0.3)   # hold neutral long enough for servo to physically reach centre
 
         csv_fh.close()
+
+        # [추가] 원본 스캔 저장. 행 순서가 CSV 와 1:1 로 대응한다.
+        if scan_sink:
+            _scan_path = PLANNER_CSV.with_name("scan_" + PLANNER_CSV.stem + ".npy")
+            _arr = np.stack(scan_sink, axis=0)
+            np.save(_scan_path, _arr)
+            print()
+            print(f"  [SAVE] raw scan -> {_scan_path}  shape={_arr.shape}"
+                  f"  ({_arr.nbytes / 1e6:.1f} MB)")
         sys.stdout.write("\n")
 
         try: camera.close()
@@ -914,6 +950,13 @@ if __name__ == "__main__":
     parser.add_argument('--out', type=str, default="planner_data.csv",
                         help='저장할 CSV 파일명 (예: spline_data.csv). 미입력시 기본값 planner_data.csv')
     
+    # [추가] 원본 스캔 보존 플래그. 기본 꺼짐 = 기존 동작과 완전 동일.
+    parser.add_argument('--save-scan', action='store_true',
+                        help='원본 1000점 스캔을 data/scan_<out>.npy 로 함께 저장 '
+                             '(24MB/10분). CSV 스키마는 바뀌지 않는다. 피처 재설계를 '
+                             '재수집 없이 오프라인으로 실험하려면 필수.')
+
     args = parser.parse_args()
     
-    main(web_port=args.web_port, scenario=args.scenario, out_csv=args.out)
+    main(web_port=args.web_port, scenario=args.scenario, out_csv=args.out,
+         save_scan=args.save_scan)
