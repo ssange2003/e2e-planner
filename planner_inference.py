@@ -294,6 +294,7 @@ def main(
     model_path:   Path = PLANNER_MODEL_PATH,
     verbose:      bool = False,
     log_history:  bool = False,
+    unstick_enabled: bool = True,   # [추가] 갇힘 탈출. --no-unstick 으로 끔
     lidar = LidarSensor()
 ):
     # Both YOLO and planner run on CPU.
@@ -399,6 +400,38 @@ def main(
 
     prev_steering = 0.0
     prev_throttle = MAX_THROTTLE  # warm-start: avoids ego=0 → low-throttle feedback loop
+
+    # [추가 2026-08-24] 갇힘 탈출(unstick). warm-start 와 같은 성격의 방어인데,
+    # 그쪽이 '출발 시점'만 막는 반면 이건 '주행 중'을 막는다.
+    #
+    #   [문제] 오프라인 폐루프 롤아웃(ego 를 자기 출력으로 되먹임, 센서는 기록값)에서
+    #   m_all 이 13코스 6,102프레임 중 532프레임(53.2초) 동안 갇혔다. 16개 구간이고
+    #   전부 앞이 뚫려 있는데(front 2.8~3.8m, 좌우 2.7~4.0m) 멈춰 있었다.
+    #   그 16구간에서 ego_throttle 만 0.7 로 강제하면 100% 회복됐다(출력 0.65~0.72).
+    #   즉 라이다 오독이 아니라 ego=0 자기고정이다.
+    #
+    #   [왜 생기나] :571 이 출력을 다음 ego 로 넣는다. 한 번 0 이 나오면
+    #   ego=0 -> 출력 0 -> ego=0 으로 스스로를 붙잡는다. 학습 때 ego 는 사람의
+    #   직전 조작(정답)이라 이 고리가 없었다.
+    #
+    #   [조건 탐색 실측] 13코스 전수. 갇힘 = 저스로틀 2초 이상인데 정답은 주행,
+    #   폭주 = 정답이 정지인데 출력 0.6 초과.
+    #     없음                    갇힘 532  폭주  848  MAE 0.2877
+    #     0.1초 지속 + s2>0.8m     갇힘   0  폭주 1124  MAE 0.2482
+    #     0.5초 지속 + s2>0.8m     갇힘   0  폭주 1002  MAE 0.2350   <- 채택
+    #     1.0초 지속 + s2>0.8m     갇힘  25  폭주  987  MAE 0.2371
+    #     2.0초 지속 + s2>0.8m     갇힘 213  폭주  878  MAE 0.2725
+    #   6,102프레임 중 리셋 53회. 갇힘을 없애면서 폭주 증가를 154 로 억제한다.
+    #
+    #   [게이트] 정면 섹터가 0.8m 넘게 열려 있을 때만 발동한다. 진짜 장애물 앞에서는
+    #   풀지 않는다. corridor 의 front_clear 를 쓰면 폭주가 989 로 조금 더 낮지만,
+    #   그건 아직 모델 입력이 아니라 lidar_s2 로 대신한다(차이 13프레임).
+    UNSTICK_LOW   = 0.05   # 모델 출력(정규화)이 이보다 낮으면 '멈춘 것'
+    UNSTICK_GATE  = 0.80   # 정면 섹터 여유거리 [m]. 이보다 좁으면 발동 안 함
+    UNSTICK_HOLD  = 5      # 연속 프레임 수. 10fps 이므로 0.5초
+    UNSTICK_RESET = 0.50   # 되돌릴 ego_throttle (정규화)
+    unstick_count = 0
+    unstick_fired = 0
     smart_filter = SmartReverseFilter()
 
     fps       = 0.0
@@ -570,6 +603,25 @@ def main(
             prev_steering = final_steering
             prev_throttle = final_throttle
 
+            # [추가 2026-08-24] 갇힘 탈출. 위 상태 변수 정의부의 주석 참조.
+            # final_throttle 은 MAX_THROTTLE 이 곱해진 값이고 ego 로 들어갈 때
+            # :174 에서 다시 나뉘므로, 임계값은 MAX_THROTTLE 스케일로 맞춘다.
+            if unstick_enabled:
+                _front = lidar_feats[2] if len(lidar_feats) > 2 else 0.0
+                if final_throttle < UNSTICK_LOW * MAX_THROTTLE and _front > UNSTICK_GATE:
+                    unstick_count += 1
+                else:
+                    unstick_count = 0
+                if unstick_count >= UNSTICK_HOLD:
+                    prev_throttle = UNSTICK_RESET * MAX_THROTTLE
+                    unstick_count = 0
+                    unstick_fired += 1
+                    if verbose:
+                        sys.stdout.write(
+                            f"{chr(10)}[unstick] front={_front:.2f}m 로 열려 있는데 "
+                            f"{UNSTICK_HOLD/10:.1f}초 정지 — ego 를 {UNSTICK_RESET} 로 복귀 "
+                            f"(누적 {unstick_fired}회){chr(10)}")
+
             # ── FPS ───────────────────────────────────────────────────────────
             fps_count += 1
             elapsed = time.time() - fps_start
@@ -643,6 +695,12 @@ if __name__ == "__main__":
                         help='Print per-frame debug: object list, lane, model outputs')
     parser.add_argument('--log-history', action='store_true',
                         help='Write per-frame steering/throttle output to inference_history_<ts>.csv')
+    # [추가 2026-08-24] 갇힘 탈출 비활성화 플래그. 기본은 켜짐.
+    # 폐루프 롤아웃 실측에서 갇힘 532프레임 -> 0, MAE 0.2877 -> 0.2350 이라 기본 켜둔다.
+    # 이전 동작으로 즉시 되돌리려면 --no-unstick 을 주면 된다.
+    parser.add_argument('--no-unstick', action='store_true',
+                        help='갇힘 탈출 로직을 끈다(이전 동작). 기본은 켜짐.')
+
     args = parser.parse_args()
 
     main(web_port     = args.web_port,
@@ -650,4 +708,5 @@ if __name__ == "__main__":
          scenario     = args.scenario,
          model_path   = args.model,
          verbose      = args.verbose,
-         log_history  = args.log_history)
+         log_history  = args.log_history,
+         unstick_enabled = not args.no_unstick)
