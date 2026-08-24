@@ -414,24 +414,37 @@ def main(
     #   ego=0 -> 출력 0 -> ego=0 으로 스스로를 붙잡는다. 학습 때 ego 는 사람의
     #   직전 조작(정답)이라 이 고리가 없었다.
     #
-    #   [조건 탐색 실측] 13코스 전수. 갇힘 = 저스로틀 2초 이상인데 정답은 주행,
-    #   폭주 = 정답이 정지인데 출력 0.6 초과.
-    #     없음                    갇힘 532  폭주  848  MAE 0.2877
-    #     0.1초 지속 + s2>0.8m     갇힘   0  폭주 1124  MAE 0.2482
-    #     0.5초 지속 + s2>0.8m     갇힘   0  폭주 1002  MAE 0.2350   <- 채택
-    #     1.0초 지속 + s2>0.8m     갇힘  25  폭주  987  MAE 0.2371
-    #     2.0초 지속 + s2>0.8m     갇힘 213  폭주  878  MAE 0.2725
-    #   6,102프레임 중 리셋 53회. 갇힘을 없애면서 폭주 증가를 154 로 억제한다.
+    #   [평가 조건] 갇히면 차가 안 움직이므로 라이다도 그 시점에 고정된다고 보고
+    #   센서를 얼린 채 롤아웃한다. 센서를 계속 진행시키면 갇힘이 532 로 과소평가된다
+    #   (실제 조건에서는 1,535). 이 차이 때문에 첫 설정을 잘못 골랐다.
     #
-    #   [게이트] 정면 섹터가 0.8m 넘게 열려 있을 때만 발동한다. 진짜 장애물 앞에서는
-    #   풀지 않는다. corridor 의 front_clear 를 쓰면 폭주가 989 로 조금 더 낮지만,
-    #   그건 아직 모델 입력이 아니라 lidar_s2 로 대신한다(차이 13프레임).
+    #   [조건 탐색 실측] 13코스 6,102프레임, 센서고정 조건.
+    #   위험발동 = 정답이 '정지' 인 프레임에서 리셋이 걸린 횟수 = 충돌 위험.
+    #     조건                                갇힘   폭주  리셋  위험발동    MAE
+    #     없음                               1535    568     0      0   0.3941
+    #     s2>0.8m 저스로틀0.5초 리셋0.50        351    909   233    123   0.2695
+    #     s2>2.5m 2초유지 저스로틀1.5초 리셋0.50  644    821     9      3   0.2947  <- 채택
+    #     s2>2.5m 2초유지 저스로틀1.5초 리셋0.15 1359    636    73     20   0.3718
+    #     s2>3.5m 3초유지 저스로틀2초  리셋0.15  1370    636    23      4   0.3757
+    #
+    #   [왜 이 조합인가]
+    #   - 게이트를 0.8m 로 두면 정지 프레임의 75% 가 통과한다(정지시 front_clear
+    #     75분위 2.93m). 그래서 위험발동이 123회로 폭증한다. 2.5m 로 조이면 3회.
+    #   - 리셋값을 0.15 로 낮추면 자극이 약해 탈출에 실패한다(갇힘 1359).
+    #     센서가 얼어 있으면 약한 자극으로는 못 빠져나오고 재갇힘을 반복한다.
+    #   - 충돌(위험발동)이 정체(갇힘)보다 나쁘므로 안전한 쪽을 택했다.
+    #
+    #   [한계] 이 설정으로도 갇힘이 644프레임(64초) 남는다. 근본 해결이 아니다.
+    #   근본 원인은 라이다의 정지 판정 상한이 balanced accuracy 0.582 라는 것이고,
+    #   그건 시간 변화량(Δ)을 모델 입력에 넣어야 0.717 로 오른다.
     UNSTICK_LOW   = 0.05   # 모델 출력(정규화)이 이보다 낮으면 '멈춘 것'
-    UNSTICK_GATE  = 0.80   # 정면 섹터 여유거리 [m]. 이보다 좁으면 발동 안 함
-    UNSTICK_HOLD  = 5      # 연속 프레임 수. 10fps 이므로 0.5초
+    UNSTICK_GATE  = 2.50   # 정면 섹터 여유거리 [m]
+    UNSTICK_OPEN  = 20     # 앞이 그만큼 열린 상태가 유지돼야 하는 프레임 수 (2초)
+    UNSTICK_HOLD  = 15     # 저스로틀 연속 프레임 수 (1.5초)
     UNSTICK_RESET = 0.50   # 되돌릴 ego_throttle (정규화)
-    unstick_count = 0
-    unstick_fired = 0
+    unstick_low_count  = 0
+    unstick_open_count = 0
+    unstick_fired      = 0
     smart_filter = SmartReverseFilter()
 
     fps       = 0.0
@@ -608,13 +621,15 @@ def main(
             # :174 에서 다시 나뉘므로, 임계값은 MAX_THROTTLE 스케일로 맞춘다.
             if unstick_enabled:
                 _front = lidar_feats[2] if len(lidar_feats) > 2 else 0.0
-                if final_throttle < UNSTICK_LOW * MAX_THROTTLE and _front > UNSTICK_GATE:
-                    unstick_count += 1
-                else:
-                    unstick_count = 0
-                if unstick_count >= UNSTICK_HOLD:
+                # 두 카운터를 따로 센다. '앞이 오래 열려 있음' 과 '오래 멈춰 있음' 이
+                # 동시에 성립해야만 발동한다. 하나만 보면 정지해야 할 때도 풀린다.
+                unstick_open_count = unstick_open_count + 1 if _front > UNSTICK_GATE else 0
+                unstick_low_count = (unstick_low_count + 1
+                                     if final_throttle < UNSTICK_LOW * MAX_THROTTLE else 0)
+                if (unstick_low_count >= UNSTICK_HOLD
+                        and unstick_open_count >= UNSTICK_OPEN):
                     prev_throttle = UNSTICK_RESET * MAX_THROTTLE
-                    unstick_count = 0
+                    unstick_low_count = 0
                     unstick_fired += 1
                     if verbose:
                         sys.stdout.write(
